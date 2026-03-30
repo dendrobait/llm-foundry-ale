@@ -8,15 +8,15 @@ This generator constructs each sample from scratch:
      instruction set and appended to the prompt.
 
 Usage:
-    python generate_from_templates.py \
+    python generate_from_instruction_templates.py \
         --output_file output.json \
         --num_samples 500
 
-    python generate_from_templates.py \
-        --output_file output.json \
+    python generate_from_instruction_templates.py \
+        --output_file output.jsonl \
         --num_samples 50000 \
         --min_modifiers 2 --max_modifiers 5 \
-        --seed 123 --verbose
+        --seed 123 --verbose --start_key 1
 """
 
 import json
@@ -263,10 +263,16 @@ def main(args):
     )
 
     #  Write output 
+    use_jsonl = args.jsonl or output_path.suffix.lower() == ".jsonl"
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(samples, f, ensure_ascii=False, indent=2)
+        if use_jsonl:
+            for sample in samples:
+                f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        else:
+            json.dump(samples, f, ensure_ascii=False, indent=2)
 
-    print(f"\nOutput written to: {output_path}")
+    fmt = "JSONL" if use_jsonl else "JSON"
+    print(f"\nOutput written to: {output_path} ({fmt})")
 
 
 if __name__ == "__main__":
@@ -308,6 +314,11 @@ if __name__ == "__main__":
         type=int,
         default=4,
         help="Maximum number of instruction modifiers per sample (default: 4).",
+    )
+    parser.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="Write output as JSONL (one JSON object per line). Also auto-detected from a .jsonl file extension.",
     )
     parser.add_argument(
         "--verbose",
