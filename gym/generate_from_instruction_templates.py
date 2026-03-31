@@ -10,13 +10,13 @@ This generator constructs each sample from scratch:
 Usage:
     python generate_from_instruction_templates.py \
         --output_file output.json \
-        --num_samples 500
+        --num_samples 10
 
     python generate_from_instruction_templates.py \
-        --output_file output.jsonl \
-        --num_samples 50000 \
-        --min_modifiers 2 --max_modifiers 5 \
-        --seed 123 --verbose --start_key 1
+        --output_file output.json \
+        --num_samples 10 \
+        --min_modifiers 1 --max_modifiers 4 \
+        --seed 123 --verbose --start_key 0
 """
 
 import json
@@ -24,7 +24,7 @@ import random
 import argparse
 from pathlib import Path
 
-from instruction_metadata import (
+from tasks_metadata import (
     ALL_VERIFIER_IDS,
     get_addable_verifiers,
     is_combination_valid,
@@ -101,6 +101,7 @@ def build_sample(template, key, min_modifiers=1, max_modifiers=4):
     base_prompt = fill_template(template)
 
     # 2. Select modifier verifier IDs
+    assert min_modifiers > 0, "At least one modifier is required"
     num_modifiers = random.randint(min_modifiers, max_modifiers)
     modifier_ids = select_modifier_ids(num_modifiers)
 
@@ -263,7 +264,7 @@ def main(args):
     )
 
     #  Write output 
-    use_jsonl = args.jsonl or output_path.suffix.lower() == ".jsonl"
+    use_jsonl = output_path.suffix.lower() == ".jsonl"
     with open(output_path, "w", encoding="utf-8") as f:
         if use_jsonl:
             for sample in samples:
@@ -300,8 +301,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--start_key",
         type=int,
-        default=10000,
-        help="Starting key value for generated samples (default: 10000).",
+        default=0,
+        help="Starting key value for generated samples (default: 0).",
     )
     parser.add_argument(
         "--min_modifiers",
@@ -316,14 +317,10 @@ if __name__ == "__main__":
         help="Maximum number of instruction modifiers per sample (default: 4).",
     )
     parser.add_argument(
-        "--jsonl",
-        action="store_true",
-        help="Write output as JSONL (one JSON object per line). Also auto-detected from a .jsonl file extension.",
-    )
-    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print detailed validation warnings.",
     )
     args = parser.parse_args()
+
     main(args)
