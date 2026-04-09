@@ -36,6 +36,8 @@ Usage:
 """
 
 import argparse
+import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -59,6 +61,61 @@ from utils import (
     normalize_speculative,
     validate_config,
 )
+
+# We need to perform a monkey-patch to datatrove's VLLM server wrapper to ensure compatibility with newer vLLM CLI changes.
+# please track the following issue: https://github.com/huggingface/datatrove/issues/480
+def _patch_datatrove_vllm_server() -> None:
+    """Patch datatrove's VLLM server wrapper for newer vLLM CLIs.
+
+    Datatrove 0.9.0 still passes ``--disable-log-requests``, but newer vLLM
+    releases changed request logging to the opt-in flag
+    ``--enable-log-requests``. Omitting the old flag preserves the intended
+    quiet default behavior.
+    """
+    from datatrove.pipeline.inference.servers.vllm_server import VLLMServer, logger
+
+    async def _start_vllm_task_compat(self) -> asyncio.subprocess.Process:
+        cmd = [
+            "vllm",
+            "serve",
+            self.config.model_name_or_path,
+            "--port",
+            str(self._port),
+            "--max-model-len",
+            str(self.config.model_max_context),
+            "--trust-remote-code",
+            "--disable-uvicorn-access-log",
+        ]
+
+        model_kwargs = self.config.model_kwargs.copy() if self.config.model_kwargs else {}
+        if self.config.tp > 1 and "tensor-parallel-size" not in model_kwargs:
+            model_kwargs["tensor-parallel-size"] = self.config.tp
+        if self.config.dp > 1 and "data-parallel-size" not in model_kwargs:
+            model_kwargs["data-parallel-size"] = self.config.dp
+        if self.config.pp > 1 and "pipeline-parallel-size" not in model_kwargs:
+            model_kwargs["pipeline-parallel-size"] = self.config.pp
+
+        if model_kwargs:
+            for key, value in model_kwargs.items():
+                if value is True:
+                    cmd.append(f"--{key}")
+                elif value is False:
+                    cmd.append(f"--no-{key}")
+                else:
+                    cmd.append(f"--{key}={value}")
+
+        logger.debug(f"Starting VLLM server with command: {' '.join(cmd)}")
+        env = os.environ.copy()
+        env.setdefault("USE_TF", "0")
+        env.setdefault("TRANSFORMERS_NO_TF", "1")
+        return await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+
+    VLLMServer._start_vllm_task = _start_vllm_task_compat
 
 
 def _detect_input_format(input_path: str) -> str:
@@ -105,7 +162,7 @@ def _compute_reader_limit(max_examples: int, tasks: int) -> int:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Generate synthetic data using vLLM on a single node with local I/O.",
+        description="Generate synthetic data using vLLM and Datatrove pipelines on a single node with local I/O",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -152,8 +209,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=8192, help="Max output tokens per generation")
     parser.add_argument("--rollouts-per-document", type=int, default=1)
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible generation")
-    parser.add_argument("--enable-thinking", action="store_true",
-                        help="Enable reasoning/thinking for supported models (e.g. Qwen3). If set, thinking is enabled; otherwise disabled.")
 
     # Processing settings
     parser.add_argument("--examples-per-chunk", type=int, default=500, help="Documents per checkpoint chunk")
@@ -164,7 +219,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
-    """Generate synthetic data using vLLM on a single node with local I/O."""
+    
+    # We need to patch datatrove's VLLM server wrapper to ensure compatibility with newer vLLM CLI changes. 
+    # Please track the following issue for updates: https://github.com/huggingface/datatrove/issues/480
+    _patch_datatrove_vllm_server()
+
     # Extract arguments as local variables
     input_path = args.input_path
     input_format = args.input_format
@@ -198,7 +257,6 @@ def main(args: argparse.Namespace) -> None:
     max_tokens = args.max_tokens
     rollouts_per_document = args.rollouts_per_document
     seed = args.seed
-    enable_thinking = args.enable_thinking
     examples_per_chunk = args.examples_per_chunk
     tasks = args.tasks
     workers = args.workers
@@ -251,11 +309,6 @@ def main(args: argparse.Namespace) -> None:
     top_p = top_p if top_p is not None else getattr(generation_config, "top_p", 1.0)
     top_k = top_k if top_k is not None else getattr(generation_config, "top_k", -1)
 
-    # Build chat_template_kwargs for reasoning/thinking control
-    chat_template_kwargs: dict[str, Any] | None = None
-    if enable_thinking:
-        chat_template_kwargs = {"enable_thinking": True}
-        logger.info("Thinking/reasoning mode: enabled")
 
     # Rollout function for a single document
     async def simple_rollout(
@@ -295,10 +348,7 @@ def main(args: argparse.Namespace) -> None:
                 "temperature": temperature,
                 "top_k": top_k,
                 "top_p": top_p,
-                **({"seed": seed} if seed is not None else {}),
-                **({
-                    "chat_template_kwargs": chat_template_kwargs
-                } if chat_template_kwargs else {}),
+                **({"seed": seed} if seed is not None else {})
             }
         )
 
