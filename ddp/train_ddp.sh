@@ -60,6 +60,7 @@ source $workdir/.venv_ddp/bin/activate
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export HF_DATASETS_CACHE="$workdir/.cache"
+export PYTHONPYCACHEPREFIX="$HF_DATASETS_CACHE/.pycache"
 export HUGGINGFACE_HUB_CACHE="$HF_DATASETS_CACHE"
 export WANDB_DIR="$HF_DATASETS_CACHE/wandb"
 export TRITON_CACHE_DIR="$HF_DATASETS_CACHE/triton_cache/$SLURM_JOB_ID"

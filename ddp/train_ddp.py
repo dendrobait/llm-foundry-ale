@@ -5,6 +5,16 @@ Production-ready training script for transformer-based causal language models us
 PyTorch DDP with either standard AdamW or a hybrid Muon + Adam optimizer.
 Designed for multi-GPU, multi-node SLURM clusters.
 
+Modules:
+
+- `train_ddp.py`: DDP setup, main training loop, and the resume-from-checkpoint logic.
+- `model_setup.py`: Pre-DDP model and tokenizer initialization.
+- `data_loading.py`: Dataset loading and DataLoader creation.
+- `mfu.py`: MFU calculation utilities for performance monitoring.
+- `optimizers.py`: Optimizer and learning rate scheduler creation.
+- `specifications.py`: Dataclass definitions for training arguments.
+- `utils.py`: Logging, checkpointing, and miscellaneous utilities.
+
 How to Use:
 
 1. Configure `specifications.yaml` with your training settings, including dataset paths, 
@@ -14,46 +24,44 @@ How to Use:
     See the `train_ddp.sh` script for an example SLURM job submission.
 """
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data import DataLoader
 import torch.distributed as dist
 import torch
-import contextlib
-import os
-import time
 
-from transformers import (
-    default_data_collator, 
-    AutoTokenizer, 
-    AutoConfig, 
-    AutoModelForCausalLM
-)
-from liger_kernel.transformers import _apply_liger_kernel_to_instance
+import contextlib
+import argparse
+import logging
+import time
+import yaml
+import math
+import sys
+import os
+
+from codecarbon import EmissionsTracker
+import numpy as np
+import wandb
+
+from model_setup import prepare_training_components
 from specifications import TrainingArguments
-from functools import partial
+from data_loading import prepare_dataloaders
+
+from mfu import (
+    calculate_training_metrics, 
+    create_mfu_context
+)
 
 from optimizers import (
     create_lr_scheduler, 
     create_optimizer, 
     get_optimizer_summary_lines
 )
+
 from utils import (
     StructuredTrainingLogger,
+    compute_training_schedule,
     setup_triton_cache, 
     cleanup_log_file, 
     checkpoint_already_validated
 )
-
-from codecarbon import EmissionsTracker
-import numpy as np
-import datasets
-import argparse
-import logging
-import wandb
-import glob
-import yaml
-import math
-import sys
 
 def main(specs, slurm_job_id, hardware):
 
@@ -144,230 +152,28 @@ def main(specs, slurm_job_id, hardware):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    # Set the precision for matrix multiplication, the TF32 mode, the CuDNN TF32 mode, 
-    # and the model precision to bfloat16 if `bf16` is set to True. 
-    # - Note: If you wish to train a model in fp16, you will need to worry about the [loss/gradient scaling](https://docs.pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-gradscaler).
-    torch.set_float32_matmul_precision(args.mat_mul_precision)
-    torch.backends.cuda.matmul.allow_tf32 = args.tf32
-    torch.backends.cudnn.allow_tf32 = args.tf32
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = args.bf16
-    precision = torch.bfloat16 if args.bf16 else torch.float32
+    # See the `model_setup.py` script for details on what this function does.
+    model_state = prepare_training_components(
+        args=args,
+        device=device,
+        master_process=master_process,
+        logger=logger,
+        file_logger=file_logger if master_process else None,
+    )
 
-    tokenizer_kwargs = {
-        "cache_dir": args.cache_dir,
-        "use_fast": True,
-        "token": args.hub_token,
-    }
-
-    # Load the tokenizer from HuggingFace or a local path.
-    if args.tokenizer_name_or_path is not None:
-
-        # [AutoTokenizer](https://huggingface.co/docs/transformers/main/en/model_doc/auto#transformers.AutoTokenizer)
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.tokenizer_name_or_path, 
-            **tokenizer_kwargs
-        )
-    else:
-        if master_process:
-            logger.info(f"No tokenizer name specified, using the {args.reference_model} to load the tokenizer.")
-            file_logger.log_metadata(f"No tokenizer name specified, using the {args.reference_model} to load the tokenizer.")
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.reference_model, 
-            **tokenizer_kwargs
-        )
-    
-    # Add the `chat_template` to the tokenizer if a path (`args.chat_template_path`) is specified.
-    if args.chat_template_path is not None:
-        with open(args.chat_template_path, "r") as f:
-            tokenizer.chat_template = f.read()
-        
-        if master_process:
-            logger.info(f"Loaded chat template from {args.chat_template_path}. Chat template added to the tokenizer.")
-            file_logger.log_metadata(f"Loaded chat template from {args.chat_template_path}. Chat template added to the tokenizer.")
-
-    # We override the model's vocab size with the tokenizer's vocab size only if the tokenizer's 
-    # vocab size is larger than the model's vocab size. It is okay for the model's vocab size 
-    # to be larger than the tokenizer's, which is basically a way of padding the vocab size 
-    # and leaving some embeddings unused. This is useful when you want to use a tokenizer
-    # with a vocab size that is not a nice round number (e.g., 50257).
-    args.vocab_size = len(tokenizer) if len(tokenizer) > args.vocab_size else args.vocab_size
-    
-    # Potentially load the model from a previous checkpoint.
-    if args.resume_from_checkpoint:
-
-        # We expect the `resume_from_checkpoint` argument to be the path to a directory of checkpoints,
-        # the logic below will find the latest checkpoint in that directory.
-        checkpoint_path = args.resume_from_checkpoint
-
-        try:
-            # We try to find the latest checkpoint in the directory.
-            checkpoint_dirs = os.listdir(checkpoint_path)
-            checkpoint_dirs = [dir for dir in checkpoint_dirs if dir.startswith(f"step_")] # Checkpoints are intended to be named like "step_1000"
-            checkpoint_path = os.path.join(checkpoint_path, sorted(checkpoint_dirs, key=lambda x: int(x.split("_")[-1].split(".")[0]))[-1])
-        except:
-            # If the checkpoint directory does not contain any checkpoints, we will assume
-            # that `resume_from_checkpoint` is already set to the latest checkpoint.
-            pass
-            
-        # [AutoModelForCausalLM](https://huggingface.co/docs/transformers/main/en/model_doc/auto#transformers.AutoModelForCausalLM)
-        model = AutoModelForCausalLM.from_pretrained(
-            checkpoint_path, 
-            torch_dtype=precision, 
-            attn_implementation=args.attn_implementation, 
-            cache_dir=args.cache_dir
-        )
-
-        if master_process:
-            logger.info(f"Resumed model from checkpoint: {checkpoint_path}")
-            file_logger.log_metadata(f"Resumed model from checkpoint: {checkpoint_path}")
-    
-    else:
-
-        # If we are not resuming from a checkpoint, and we are not doing continual pretraining,
-        # we initialize the model from `AutoConfig`.
-        if not args.continual_pretraining:
-            if master_process:
-                logger.info(f"Initializing model from `AutoConfig`.")
-                file_logger.log_metadata("Initializing model from `AutoConfig`.")
-
-            # Define the model architecture.
-            config_kwargs = {
-                "cache_dir": args.cache_dir,
-                "token": args.hub_token,
-                "output_hidden_states": args.output_hidden_states,
-                "hidden_size": args.hidden_size,
-                "intermediate_size": args.hidden_size * 4 if args.intermediate_size is None else args.intermediate_size,
-                "max_position_embeddings": args.max_position_embeddings,
-                "num_attention_heads": args.num_attention_heads,
-                "num_key_value_heads": args.num_attention_heads if args.num_key_value_heads is None else args.num_key_value_heads,
-                "head_dim": args.hidden_size // args.num_attention_heads if args.head_dim is None else args.head_dim,
-                "num_hidden_layers": args.num_hidden_layers,
-                "bos_token_id": tokenizer.bos_token_id,
-                "eos_token_id": tokenizer.eos_token_id,
-                "pad_token_id": tokenizer.pad_token_id,
-                "unk_token_id": tokenizer.unk_token_id,
-                "torch_dtype": precision,
-                "vocab_size": args.vocab_size,
-                "rope_theta": args.rope_theta,
-                "use_cache": args.use_cache,
-                "hidden_act": args.hidden_act,
-                "rms_norm_eps": args.rms_norm_eps,
-                "tie_word_embeddings": args.tie_word_embeddings,
-                "layer_types": ["full_attention"] * args.num_hidden_layers, # If you want to alternate full_attention and sparse_attention ("sliding_attention"), you can do it here.
-                "no_rope_layer_interval": args.no_rope_layer_interval, # [NoPE: The Counting Power of Transformers with No Positional Encodings](https://arxiv.org/pdf/2505.11199)
-                "no_rope_layers": [0 if (i + 1) % args.no_rope_layer_interval == 0 else 1 for i in range(args.num_hidden_layers)] \
-                    if args.no_rope_layer_interval is not None else [1] * args.num_hidden_layers,
-                "pretraining_tp": 1, # Just to make sure we are no inheriting from a tensor-parallel pretraining config
-                "transformers.js_config": None, # Just to make sure we are not inheriting from a transformers.js config
-            }
-
-            # Create an instance of the model using AutoConfig and the set configuration.
-            # [AutoConfig](https://huggingface.co/docs/transformers/main/en/model_doc/auto#transformers.AutoConfig)
-            # [AutoModelForCausalLM](https://huggingface.co/docs/transformers/main/en/model_doc/auto#transformers.AutoModelForCausalLM)
-            model = AutoModelForCausalLM.from_config(
-                AutoConfig.from_pretrained(
-                    args.reference_model if args.reference_model is not None else "HuggingFaceTB/SmolLM2-360M", # Llama!
-                    **config_kwargs,
-                ), 
-                attn_implementation=args.attn_implementation,
-            )
-        
-        # If we are doing continual pretraining, we load the model from the reference model.
-        else:
-            if master_process:
-                logger.info(f"Initializing model from reference model: {args.reference_model} for continual pretraining/fine-tuning.")
-                file_logger.log_metadata(f"Initializing model from reference model: {args.reference_model} for continual pretraining/fine-tuning.")
-
-            # Check if we are performing RoPE extension/scaling.
-            # What is RoPE scaling?
-            # RoPE (Rotary Position Embedding) scaling is a technique used to adjust the position embeddings
-            # of a model to better fit the input sequence length and improve performance on longer sequences.
-            # By increasing the rope_theta parameter and adjusting the max_position_embeddings, we can
-            # effectively scale the maximum sequence length our model can handle by training on longer sequences.
-            if args.rope_scale_factor is not None:
-                
-                # Get the model configuration from the reference model.
-                config = AutoConfig.from_pretrained(args.reference_model, cache_dir=args.cache_dir)
-
-                # Increase the max position embeddings based on the RoPE scale factor.
-                config.max_position_embeddings = int(args.max_position_embeddings * args.rope_scale_factor)
-                args.max_position_embeddings = config.max_position_embeddings
-
-                # Check if we scale the base frequency (rope_theta).
-                if config.rope_theta == args.rope_theta:
-                    if master_process:
-                        logger.info(f"WARNING: RoPE theta should scale when performing RoPE scaling. Check your configurations and perhaps adjust the rope_theta to a larger value.")
-                
-                # Set the new RoPE theta (hopefully scaled).
-                config.rope_theta = args.rope_theta
-
-                if master_process:
-                    logger.info(f"Performing RoPE scaling to {config.max_position_embeddings} max position embeddings and {config.rope_theta} rope theta.")
-                    logger.info(f"WARNING: `args.max_position_embeddings` has been reset to {args.max_position_embeddings}.")
-                    file_logger.log_metadata(f"Performing RoPE scaling to {config.max_position_embeddings} max position embeddings and {config.rope_theta} rope theta.")
-                        
-
-            # [AutoModelForCausalLM](https://huggingface.co/docs/transformers/main/en/model_doc/auto#transformers.AutoModelForCausalLM)
-            model = AutoModelForCausalLM.from_pretrained(
-                args.reference_model, 
-                torch_dtype=precision, 
-                attn_implementation=args.attn_implementation, 
-                cache_dir=args.cache_dir,
-                config=config if args.rope_scale_factor is not None else None,
-            )
-    
-    # Set the tokenizer `model_max_length` to the models max position embeddings.
-    tokenizer.model_max_length = model.config.max_position_embeddings
-
-    # [Liger Kernel: Efficient Triton Kernels for LLM Training](https://github.com/linkedin/Liger-Kernel)
-    if args.use_liger_kernel:
-        # Apply the Liger kernels to the model.
-        liger_kwargs = {
-            "rope": True,
-            "cross_entropy": False,
-            "fused_linear_cross_entropy": True,
-            "rms_norm": True,
-            "swiglu": True,
-        }
-        # Learn more on how to CORRECTLY apply the Liger kernels to the model here:
-        # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/transformers/monkey_patch.py
-        _apply_liger_kernel_to_instance(model=model, **liger_kwargs)
-
-        if master_process:
-            logger.info(f"Applied Liger kernels to the model.")
-            file_logger.log_metadata("Applied Liger kernels to the model.")
-
-    # Change the model's `name_or_path`. If set to
-    # None this will not show in the config (which is totally fine).
-    model.config.name_or_path = args.hub_model_id
-  
-    # Print the number of trainable parameters in the model.
-    if master_process:
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Number of trainable parameters: {params:,}")
-        file_logger.log_metadata(f"Number of trainable parameters: {params:,}")
-
-    # Set the gradient checkpointing for the model
-    # What is Gradient Checkpointing? -> https://arxiv.org/abs/1604.06174
-    if args.gradient_checkpointing:
-
-        if master_process:
-            logger.info(f"Gradient checkpointing enabled.")
-            file_logger.log_metadata("Gradient checkpointing enabled.")
-
-        # Enable gradient checkpointing (https://huggingface.co/docs/transformers/main/en/model_doc/auto#transformers.AutoModelForCausalLM)
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False if torch.cuda.device_count() > 1 else True})
-        model.config.use_cache = False
-
-    # [Torch Compile](https://docs.pytorch.org/docs/stable/generated/torch.compile.html)
-    # WARNING: Torch compile is not working good with liger kernel: https://github.com/linkedin/Liger-Kernel/issues/174
-    if args.torch_compile and not args.use_liger_kernel:
-        if master_process:
-            logger.info(f"Compiling model with torch.compile.")
-        model = torch.compile(model)
-
-    model.to(device)
+    # We receive back:
+    # - the updated `args` object.
+    # - the tokenizer (a HuggingFace tokenizer object).
+    # - the model (a PyTorch nn.Module object, still unwrapped in DDP).
+    # - the precision (torch.bfloat16 or torch.float32).
+    # - the checkpoint path (if resuming from checkpoint, otherwise None).
+    # - the number of trainable parameters in the model (int).
+    args = model_state.args
+    tokenizer = model_state.tokenizer
+    model = model_state.model
+    precision = model_state.precision
+    checkpoint_path = model_state.checkpoint_path
+    params = model_state.trainable_params
 
     if ddp:
         # Wrap the model with DistributedDataParallel (DDP).
@@ -411,226 +217,50 @@ def main(specs, slurm_job_id, hardware):
         ) 
 
     # Unwrap version of the model if it is wrapped in DDP.
-    # Some methods we need to call on the unwrapped model
-    # and this just make things simpler.
     raw_model = model.module if ddp else model 
 
-    # What is a sanity check?
-    # A sanity check is a quick test to ensure that the training script
-    # is working as expected.
-    if args.sanity_check:
-
-        # Create a list of tokens to be used for the sanity check.
-        input_ids = [torch.arange(args.max_position_embeddings, device="cpu")]  * args.sanity_check_num_samples
-        
-        dataset = datasets.Dataset.from_dict(
-            {
-                "input_ids": input_ids,
-            }
-        ).with_format("torch")
-
-        # Use 10% of the dataset for validation.
-        train_dataset, val_dataset = dataset, dataset.select(range(int(args.sanity_check_num_samples * 0.1)))
-
-    else:
-
-        # Load our training dataset.
-        # We expect the dataset to be in a specific format: jsonl or parquet.
-        assert args.dataset_type in ["jsonl", "parquet"], f"Dataset type must be either 'jsonl' or 'parquet', got {args.dataset_type}."
-
-        train_dataset_files = []
-        train_dirs = args.train_dataset_dir
-        if isinstance(train_dirs, str):
-            train_dirs = [train_dirs]
-
-        # Below, we loop over all training directories and collect the dataset files that
-        # have the correct file extension.
-        for train_dir in train_dirs:
-            if os.path.isfile(train_dir) and train_dir.endswith(f".{args.dataset_type}"):
-                train_dataset_files.append(train_dir)
-            elif os.path.isdir(train_dir):
-                train_dataset_files += glob.glob(f"{train_dir}/*.{args.dataset_type}")
-
-        # If shuffling is enabled, we shuffle the dataset files.
-        if args.shuffle_dataset:
-            if master_process:
-                logger.info(f"Shuffling enabled. Shuffling {len(train_dataset_files)} dataset files.")
-                file_logger.log_metadata(f"Shuffling enabled. Shuffling {len(train_dataset_files)} dataset files.")
-            np.random.seed(args.seed)
-            np.random.shuffle(train_dataset_files)
-
-        # Validation dataset is expected to always be in a single directory.
-        # Validation files should be of the same type as the training files.
-        val_dataset_files = glob.glob(f"{args.val_dataset_dir}/*.{args.dataset_type}")
-        
-        # Change jsonl to json if the dataset type is jsonl (dont know how to make this cleaner)
-        args.dataset_type = "json" if args.dataset_type == "jsonl" else args.dataset_type
-
-        # Load the datasets from disk
-        # [datasets.load_dataset](https://huggingface.co/docs/datasets/main/en/package_reference/loading_methods#datasets.load_dataset)
-        train_dataset = datasets.load_dataset(
-            args.dataset_type,
-            data_files=train_dataset_files,
-            split='train',
-            num_proc=len(train_dataset_files),
-            cache_dir=args.cache_dir,
-        )
-
-        val_dataset = datasets.load_dataset(
-            args.dataset_type,
-            data_files=val_dataset_files,
-            split='train',
-            num_proc=len(val_dataset_files),
-            cache_dir=args.cache_dir,
-        )
-
-        # Shuffle the indicies of the training dataset.
-        if args.shuffle_dataset:
-            train_dataset = train_dataset.shuffle(seed=args.seed)
-            if master_process:
-                logger.info(f"Shuffling enabled. Shuffling indices.")
-
-        # Format the input_ids lists as torch.tensor.
-        train_dataset = train_dataset.with_format("torch")
-        val_dataset = val_dataset.with_format("torch")
-        
-
-    # Initialize the DistributedSampler.
-    # This sampler is designed to partition the dataset among multiple processes.
-    # [DistributedSampler](https://pytorch.org/docs/stable/data.html#torch.utils.data.distributed.DistributedSampler)
-    train_sampler = DistributedSampler(
-        train_dataset,
-        num_replicas=world_size,
+    # See the `data_loading.py` module for details on dataset loading and dataloader creation.
+    data = prepare_dataloaders(
+        args=args,
+        tokenizer=tokenizer,
+        world_size=world_size,
         rank=rank,
-        shuffle=args.shuffle_dataset,
-        drop_last=False,
-        )
-    
-    val_sampler = DistributedSampler(
-        val_dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False,
-        drop_last=False,
-        )
-    
-    # Create the dataloaders.
-    # [DataLoader](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader)
-    dataloader_generator = torch.Generator()
-    dataloader_generator.manual_seed(args.seed)
-
-    # Create a collate function that will generate batches with labels.
-    # This function allows us to selectively mask certain tokens (e.g., eos or pad)
-    if args.mask_eos_token:
-        assert tokenizer.eos_token_id is not None, "The tokenizer does not have an eos token id."
-    if args.mask_pad_token:
-        assert tokenizer.pad_token_id is not None, "The tokenizer does not have a pad token id."
-        assert tokenizer.pad_token_id != tokenizer.eos_token_id, "The pad token and eos token are the same. This can lead to issues when masking."
-
-    if master_process:
-        logger.info(f"Collate function masking settings: mask_eos_token={args.mask_eos_token}, mask_pad_token={args.mask_pad_token}.")
-        file_logger.log_metadata(f"Collate function masking settings: mask_eos_token={args.mask_eos_token}, mask_pad_token={args.mask_pad_token}.")
-    
-    def collate_with_masking(
-            examples, 
-            eos_id=tokenizer.eos_token_id, 
-            pad_id=tokenizer.pad_token_id
-        ):
-        """Collate function that masks specified tokens (e.g., eos or pad)."""
-
-        # [default_data_collator](https://huggingface.co/docs/transformers/main_classes/data_collator#transformers.default_data_collator)
-        batch = default_data_collator(examples)
-
-        # If we already have labels in the batch, we do not need to create them again.
-        # IMPORTANT: This assumes that the labels are already masked correctly.
-        if "labels" in batch:
-            return batch
-        
-        # If not, we create them here.
-        input_ids = batch.get("input_ids")
-        labels = input_ids.clone()
-
-        # Mask the loss of the eos token (see the [Apertus Report](https://arxiv.org/abs/2509.14233))
-        if args.mask_eos_token:
-            labels[labels == eos_id] = -100
-        # Mask the loss of the pad token (useful when using padding in the dataset)
-        if args.mask_pad_token:
-            labels[labels == pad_id] = -100
-
-        # Attach the masked copy to the batch
-        batch["labels"] = labels
-
-        return batch
-    
-    collate_fn = partial(
-        collate_with_masking, 
-        eos_id=tokenizer.eos_token_id,
-        pad_id=tokenizer.pad_token_id
-    )
-    
-    train_dataloader = DataLoader(
-        train_dataset,
-        sampler=train_sampler,
-        collate_fn=collate_fn,
-        batch_size=args.micro_batch_size,
-        pin_memory=args.pin_memory,
-        num_workers=args.num_workers_for_dataloader,
-        generator=dataloader_generator,
-        # The number of samples loaded in advance by the dataloader.
-        # If you see that your optimization steps are lagging in a
-        # periodic manner, try to increase the `prefetch_factor`.
-        prefetch_factor=args.prefetch_factor
+        logger=logger if master_process else None,
+        file_logger=file_logger if master_process else None,
     )
 
-    validation_dataloader = DataLoader(
-        val_dataset,
-        sampler=val_sampler,
-        collate_fn=collate_fn,
-        batch_size=args.eval_micro_batch_size,
-        pin_memory=args.pin_memory,
-        num_workers=args.num_workers_for_dataloader,
-        prefetch_factor=args.prefetch_factor, 
-        # We do not need to shuffle the validation set, so we dont pass in the generator
+    train_dataloader = data.train_dataloader
+    validation_dataloader = data.val_dataloader
+    train_sampler = data.train_sampler
+
+    # Calculate gradient accumulation steps, steps per epoch, and total training steps.
+    gradient_accumulation_steps, num_update_steps_per_epoch, max_steps = compute_training_schedule(
+        args, len(train_dataloader), world_size
     )
+    if args.max_steps is not None and master_process:
+        logger.info(f"Overriding the number of steps to {max_steps} as per the `max_steps` argument (check the YAML file if you are not sure).")
+        file_logger.log_metadata(f"Overriding the number of steps to {max_steps} as per the `max_steps` argument (check the YAML file if you are not sure).")
 
-    # Calculate the gradient accumulation steps.
-    # Instead of breaking your head calculating this manually, we set the script to this on the fly.
-    # The number of gradient accumulation steps is estimated based on how many tokens you want (`total_batch_size`) 
-    # to be processed in a single step. If you stipulate a `total_batch_size` that does not divide evenly by
-    # `micro_batch_size` * `max_position_embeddings` * `world_size`, we will throw an error.
-    assert args.total_batch_size % (args.micro_batch_size * args.max_position_embeddings * world_size) == 0, "Make sure your `total_batch_size` is divisible by `micro_batch_size` * `max_position_embeddings` * `world_size`"
-    gradient_accumulation_steps = args.total_batch_size // (args.micro_batch_size * args.max_position_embeddings * world_size)
-
-    # Now, we need to calculate the math around the number of steps per epoch and the total number of steps.
-    # Initially, we will set the number of steps per epoch to the number of batches in the training dataloader.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
-    # Then, `max_steps` is just `num_update_steps_per_epoch` * your number of epochs
-    max_steps = math.ceil(args.num_train_epochs * num_update_steps_per_epoch)
-
-    # If the `args.max_steps` is set, we will override the `max_steps` with the value from the arguments.
-    if args.max_steps is not None:
-        max_steps = args.max_steps
-        args.num_train_epochs = max_steps // num_update_steps_per_epoch if max_steps > num_update_steps_per_epoch else 1
-        if master_process:
-            logger.info(f"Overriding the number of steps to {max_steps} as per the `max_steps` argument (check the YAML file if you are not sure).")
-            file_logger.log_metadata(f"Overriding the number of steps to {max_steps} as per the `max_steps` argument (check the YAML file if you are not sure).")
-
-    lr_scheduler = create_lr_scheduler(args, max_steps, args.optimizer_type)
+    lr_scheduler = create_lr_scheduler(args, max_steps)
 
     if master_process:
         logger.info(f"Using learning rate decay type: {args.lr_decay_type}")
         file_logger.log_metadata(f"Using learning rate decay type: {args.lr_decay_type}")
 
+    # See the `optimizers.py` script for details on what this function does.
+    # We receive back: 
+    # - the optimizer.
+    # - the optimizer step (a function that we will call to update the optimizer).
+    # - a label describing the optimizer (for logging purposes).
     optimizer, optimizer_step, optimizer_label = create_optimizer(
-        model,
-        args,
-        device_type,
-        args.optimizer_type,
-        master_process,
-        logger,
+        model=model,
+        args=args,
+        device_type=device_type,
+        master_process=master_process,
+        logger=logger,
     )
 
-    # Resume the optimizer from the checkpoint.
+    # If we are resuming from checkpoint, we load the optimizer state from the checkpoint.
     if args.resume_from_checkpoint:
 
         checkpoint = os.path.join(checkpoint_path, 'checkpoint.pt')
@@ -655,13 +285,12 @@ def main(specs, slurm_job_id, hardware):
             logger.info(f"    Starting from step | {checkpoint.get('resume_step', None) if not args.begin_new_stage else None}")
         logger.info("="*50)
         logger.info("Dataset Configuration:")
-        logger.info(f"  Num train examples | {len(train_dataset):,}")
-        logger.info(f"  Num validation examples | {len(val_dataset):,}")
+        logger.info(f"  Num train examples | {data.num_train_samples:,}")
+        logger.info(f"  Num validation examples | {data.num_val_samples:,}")
         logger.info(f"  Length of train dataloader | {len(train_dataloader):,}")
         logger.info(f"  Max position embeddings (seq length) | {args.max_position_embeddings:,}")
         logger.info(f"  Shuffle dataset | {args.shuffle_dataset}")
-        logger.info(f"  Mask EOS token | {args.mask_eos_token}")
-        logger.info(f"  Mask PAD token | {args.mask_pad_token}")
+        logger.info(f"  Additional mask token IDs | {args.additional_mask_token_ids}")
         logger.info("="*50)
         logger.info("Batch Configuration:")
         logger.info(f"  Num Epochs | {args.num_train_epochs}")
@@ -674,14 +303,15 @@ def main(specs, slurm_job_id, hardware):
         logger.info(f"  Checkpointing every | {args.checkpointing_steps} steps")
         logger.info("="*50)
         logger.info("Model Architecture:")
-        logger.info(f"  Model type | {args.reference_model if args.reference_model else 'Custom'}")
+        logger.info(f"  Model config | {args.path_to_model_config or args.base_model or 'From checkpoint'}")
         logger.info(f"  Attention implementation | {args.attn_implementation}")
         logger.info(f"  Gradient checkpointing | {args.gradient_checkpointing}")
         logger.info(f"  Liger kernel | {args.use_liger_kernel}")
         logger.info(f"  Torch compile | {args.torch_compile}")
+        logger.info(f"  MFU type | {args.mfu_type}")
         logger.info(f"  Trainable parameters | {params:,}")
         logger.info("="*50)
-        optimizer_summary_lines = get_optimizer_summary_lines(args, args.optimizer_type)
+        optimizer_summary_lines = get_optimizer_summary_lines(args)
         logger.info(f"Optimizer Configuration ({optimizer_label}):")
         for line in optimizer_summary_lines:
             logger.info(line)
@@ -697,13 +327,12 @@ def main(specs, slurm_job_id, hardware):
             file_logger.log_metadata(f"  Precision | {'bfloat16' if args.bf16 else 'float32'}")
             file_logger.log_metadata("="*50)
             file_logger.log_metadata("Dataset Configuration:")
-            file_logger.log_metadata(f"  Num train examples | {len(train_dataset):,}")
-            file_logger.log_metadata(f"  Num validation examples | {len(val_dataset):,}")
+            file_logger.log_metadata(f"  Num train examples | {data.num_train_samples:,}")
+            file_logger.log_metadata(f"  Num validation examples | {data.num_val_samples:,}")
             file_logger.log_metadata(f"  Length of train dataloader | {len(train_dataloader):,}")
             file_logger.log_metadata(f"  Max position embeddings (seq length) | {args.max_position_embeddings:,}")
             file_logger.log_metadata(f"  Shuffle dataset | {args.shuffle_dataset}")
-            file_logger.log_metadata(f"  Mask EOS token | {args.mask_eos_token}")
-            file_logger.log_metadata(f"  Mask PAD token | {args.mask_pad_token}")
+            file_logger.log_metadata(f"  Additional mask token IDs | {args.additional_mask_token_ids}")
             file_logger.log_metadata("="*50)
             file_logger.log_metadata("Batch Configuration:")
             file_logger.log_metadata(f"  Num Epochs | {args.num_train_epochs}")
@@ -716,11 +345,12 @@ def main(specs, slurm_job_id, hardware):
             file_logger.log_metadata(f"  Checkpointing every | {args.checkpointing_steps} steps")
             file_logger.log_metadata("="*50)
             file_logger.log_metadata("Model Architecture:")
-            file_logger.log_metadata(f"  Model type | {args.reference_model if args.reference_model else 'Custom'}")
+            file_logger.log_metadata(f"  Model config | {args.path_to_model_config or args.base_model or 'From checkpoint'}")
             file_logger.log_metadata(f"  Attention implementation | {args.attn_implementation}")
             file_logger.log_metadata(f"  Gradient checkpointing | {args.gradient_checkpointing}")
             file_logger.log_metadata(f"  Liger kernel | {args.use_liger_kernel}")
             file_logger.log_metadata(f"  Torch compile | {args.torch_compile}")
+            file_logger.log_metadata(f"  MFU type | {args.mfu_type}")
             file_logger.log_metadata(f"  Trainable parameters | {params:,}")
             file_logger.log_metadata("="*50)
             file_logger.log_metadata(f"Optimizer Configuration ({optimizer_label}):")
@@ -793,29 +423,9 @@ def main(specs, slurm_job_id, hardware):
 
         logger.info(f'Geo Location: ISO: {tracker._geo.country_iso_code} | Country: {tracker._geo.country_name} | Region : {tracker._geo.region}')
         tracker.start()
-
-        # MFU is a performance efficiency metric that measures how well a model training run utilizes the available peak compute of the hardware.
-        # P = is the peak FLOPS of the hardware (the promise)
-        # C = is the total number of parameters in the model (the capacity)
-        # L = is the number of layers in the model
-        # H = is the number of attention heads in the model
-        # Q = is the hidden size per attention head
-        # T = is the max position embeddings
-        # What is the formula?
-        # MFU = (Achieved FLOPS) / (Peak FLOPS)
-        # Achieved FLOPS = (FLOPS per iteration) * (1 / dt)
-        # dt = (time taken for the step in seconds)
-        # FLOPS per iteration = (FLOPS per forward and backward pass) * (batch size)
-        # FLOPS per forward and backward pass = (FLOPS per token) * T
-        # FLOPS per token = 6 * C + 12 * L * H * Q * T
-        P = 300e12 if hardware == "a100" else 150e12 if hardware == "a40" else None
-        C = params
-        L = args.num_hidden_layers
-        H = args.num_attention_heads
-        Q = args.hidden_size // args.num_attention_heads if args.head_dim is None else args.head_dim
-        T = args.max_position_embeddings
-        if P is None:
-            raise ValueError("Hardware not supported for MFU calculation.")
+        # Get the correct MFU calculation settings.
+        # See the `mfu.py` script for details on what this function does.
+        mfu_context = create_mfu_context(args=args, hardware=hardware, num_parameters=params)
 
     # Set the model to training mode.
     model.train()
@@ -1066,16 +676,24 @@ def main(specs, slurm_job_id, hardware):
 
         if master_process:
 
-            # Calculate the MFU and other performance metrics.
             dt = t1 - t0
-            tokens_processed = (args.micro_batch_size * gradient_accumulation_steps) * args.max_position_embeddings * world_size
-            global_tokens_per_sec = tokens_processed / dt
-            tokens_per_sec_per_gpu = global_tokens_per_sec / world_size
-            flops_per_token  = 6*C + 12*L*H*Q*T
-            flops_per_fwdbwd = flops_per_token * T
-            flops_per_iter = flops_per_fwdbwd * (args.micro_batch_size * gradient_accumulation_steps)
-            flops_achieved = flops_per_iter * (1 / dt)
-            mfu = (flops_achieved / P) * 100
+            # Calculate the MFU and other performance metrics.
+            # See the `mfu.py` script for details on what this function does.
+            performance_metrics = calculate_training_metrics(
+                mfu_context=mfu_context,
+                micro_batch_size=args.micro_batch_size,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                world_size=world_size,
+                dt=dt,
+            )
+            
+            # We receive back:
+            # - The global tokens per second (tokens/s processed across all GPUs).
+            # - The tokens per second per GPU.
+            # - The MFU (the GPU utilization metric). 
+            global_tokens_per_sec = performance_metrics.global_tokens_per_sec
+            tokens_per_sec_per_gpu = performance_metrics.tokens_per_sec_per_gpu
+            mfu = performance_metrics.mfu
 
             # Get the current VRAM usage.
             if device.startswith("cuda"):

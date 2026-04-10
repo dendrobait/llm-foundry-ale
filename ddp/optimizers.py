@@ -322,8 +322,12 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
         return loss
 
 
-def create_lr_scheduler(args, max_steps, optimizer_type):
+def create_lr_scheduler(args, max_steps):
+    """
+    Create a learning rate scheduler based on the provided arguments and maximum steps.
+    """
     def cosine_schedule(it, max_lr):
+        """Cosine learning rate schedule with warmup."""
         lr_decay_iters = max_steps * args.lr_decay_iters_coef
         if args.warmup_steps > 0 and it < args.warmup_steps:
             return max_lr * (it + 1) / args.warmup_steps, "warmup"
@@ -336,6 +340,7 @@ def create_lr_scheduler(args, max_steps, optimizer_type):
         return args.min_learning_rate + coeff * (max_lr - args.min_learning_rate), "cosine_decay"
 
     def wsd_schedule(it, max_lr):
+        """WSD learning rate schedule with warmup."""
         lr_decay_iters = max_steps * args.lr_decay_iters_coef
         stable_iters = max_steps - lr_decay_iters
         if args.warmup_steps > 0 and it < args.warmup_steps:
@@ -360,16 +365,19 @@ def create_lr_scheduler(args, max_steps, optimizer_type):
     def lr_scheduler(it):
         adam_lr, stage = schedule_fn(it, args.max_learning_rate)
         muon_lr = None
-        if optimizer_type == "muon_adam":
+        if args.optimizer_type == "muon_adam":
             muon_lr, _ = schedule_fn(it, args.muon_learning_rate)
         return adam_lr, muon_lr, stage
 
     return lr_scheduler
 
-def create_optimizer(model, args, device_type, optimizer_type, master_process, logger=None):
+def create_optimizer(model, args, device_type, master_process, logger=None):
+    """
+    Create an optimizer based on the provided model and arguments. Supports both AdamW and MuonWithAuxAdam.
+    """
     no_decay = ["bias", "layer_norm.weight", "embed_tokens.weight"]
 
-    if optimizer_type == "muon_adam":
+    if args.optimizer_type == "muon_adam":
         hidden_matrix_params = [p for n, p in model.named_parameters() if p.ndim >= 2 and "embed_tokens.weight" not in n]
         embed_params = [p for n, p in model.named_parameters() if "embed_tokens.weight" in n]
         scalar_params_with_decay = [p for n, p in model.named_parameters() if p.ndim < 2 and not any(nd in n for nd in no_decay)]
@@ -470,9 +478,9 @@ def create_optimizer(model, args, device_type, optimizer_type, master_process, l
 
     return optimizer, optimizer_step, optimizer_label
 
-def get_optimizer_summary_lines(args, optimizer_type):
+def get_optimizer_summary_lines(args):
     summary_lines = [
-        f"  Optimizer type | {optimizer_type}",
+        f"  Optimizer type | {args.optimizer_type}",
         f"  Max learning rate (Adam) | {args.max_learning_rate}",
         f"  Min learning rate | {args.min_learning_rate}",
         f"  LR scheduler type | {args.lr_decay_type.upper()}",
@@ -484,6 +492,6 @@ def get_optimizer_summary_lines(args, optimizer_type):
         f"  Epsilon | {args.eps}",
         f"  Max grad norm | {args.max_grad_norm}",
     ]
-    if optimizer_type == "muon_adam":
+    if args.optimizer_type == "muon_adam":
         summary_lines.insert(2, f"  Muon learning rate | {args.muon_learning_rate}")
     return summary_lines

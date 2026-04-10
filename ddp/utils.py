@@ -2,19 +2,27 @@
 Utility helpers for the DDP trainer.
 
 Provides:
+    - compute_training_schedule:    gradient accumulation steps and step counts
     - setup_triton_cache:           per-rank Triton cache with cleanup
     - StructuredTrainingLogger:     structured metadata/stats file writer
     - cleanup_log_file:             truncate log after last validation entry
     - checkpoint_already_validated: check if a step was already validated
 """
 import json
+import math
 import os
 import time
 import torch.distributed as dist
 
 
 class StructuredTrainingLogger:
-    """Write training logs as metadata lines and JSON stats entries."""
+    """
+    Write training logs as metadata lines and JSON stats entries.
+    
+    This class has mainly two methods:
+    - log_metadata: for writing human-readable metadata lines (e.g. hyperparameters)
+    - log_stats: for writing structured JSON lines (e.g. training/validation metrics)
+    """
 
     def __init__(self, log_file):
         self.log_file = log_file
@@ -56,6 +64,10 @@ class StructuredTrainingLogger:
 
 
 def _parse_legacy_validation_step(line):
+    """
+    Parse legacy validation step from a log line.
+    This is for backward compatibility with older log formats that may not have structured JSON entries.
+    """
     if not line.startswith("Validation") or "step:" not in line:
         return None
     try:
@@ -80,6 +92,34 @@ def _iter_log_entries(log_file):
                 continue
 
             yield index, current_section, line
+
+
+def compute_training_schedule(args, train_dataloader_length, world_size):
+    """
+    Compute gradient accumulation steps, steps per epoch, and total training steps.
+
+    Returns a tuple of (gradient_accumulation_steps, num_update_steps_per_epoch, max_steps).
+    May update ``args.num_train_epochs`` in-place when ``args.max_steps`` overrides the schedule.
+    """
+    tokens_per_step = args.micro_batch_size * args.max_position_embeddings * world_size
+    assert args.total_batch_size % tokens_per_step == 0, (
+        f"Make sure your `total_batch_size` ({args.total_batch_size}) is divisible by "
+        f"`micro_batch_size` * `max_position_embeddings` * `world_size` ({tokens_per_step})"
+    )
+    gradient_accumulation_steps = args.total_batch_size // tokens_per_step
+
+    num_update_steps_per_epoch = math.ceil(train_dataloader_length / gradient_accumulation_steps)
+    max_steps = math.ceil(args.num_train_epochs * num_update_steps_per_epoch)
+
+    if args.max_steps is not None:
+        max_steps = args.max_steps
+        args.num_train_epochs = (
+            max_steps // num_update_steps_per_epoch
+            if max_steps > num_update_steps_per_epoch
+            else 1
+        )
+
+    return gradient_accumulation_steps, num_update_steps_per_epoch, max_steps
 
 
 def setup_triton_cache():
