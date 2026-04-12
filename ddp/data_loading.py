@@ -2,7 +2,7 @@
 Dataset loading and DataLoader creation for the DDP trainer.
 
 Provides:
-    - create_collate_fn:  factory for the default collate function with token masking
+    - create_collate_fn:          factory for the default collate function with token masking
     - prepare_dataloaders:        main entry point; returns fully configured dataloaders
     - DataLoaderBundle:           return type bundling dataloaders and metadata
 """

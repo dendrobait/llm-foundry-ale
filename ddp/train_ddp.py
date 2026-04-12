@@ -333,7 +333,9 @@ def main(specs, slurm_job_id, hardware):
 
         # Get the correct MFU calculation settings.
         # See the `mfu.py` script for details on what this function does.
-        mfu_context = create_mfu_context(args=args, hardware=hardware, num_parameters=params)
+        # Use active_trainable_params so MoE models count only the experts
+        # that participate in each forward pass.
+        mfu_context = create_mfu_context(args=args, hardware=hardware, num_parameters=model_state.active_trainable_params)
 
     # Create the Trainer and run the training loop.
     trainer = Trainer(

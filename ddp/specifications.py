@@ -313,6 +313,25 @@ class TrainingArguments:
             "Learn more here: https://github.com/pytorch/pytorch/issues/143580"
         )},
     )
+    enable_expert_parallelism: Optional[bool] = field(
+        default=False,
+        metadata={"help": (
+            "Whether to enable expert parallelism for MoE models via transformers' DistributedConfig. "
+            "When True, the model will be loaded with `distributed_config=DistributedConfig(enable_expert_parallel=True)`. "
+            "Requires a compatible version of transformers (>= 5.x). If the import fails, "
+            "a warning is logged and training continues without expert parallelism."
+        )},
+    )
+    use_kernels: Optional[bool] = field(
+        default=False,
+        metadata={"help": (
+            "Whether to use optimized HF Hub kernels via the `kernels` library. "
+            "When True, the model will be loaded with `use_kernels=True`, letting transformers "
+            "automatically find and apply the best available kernel implementations. "
+            "Requires the `kernels` package (>= 0.11.0) and a compatible version of transformers. "
+            "If the import fails, a warning is logged and training continues without kernels."
+        )},
+    )
 
     # Checkpoint settings
     resume_from_checkpoint: Optional[str] = field(

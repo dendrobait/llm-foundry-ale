@@ -243,6 +243,9 @@ from mfu import (
     MFU_REGISTRY,
     create_mfu_context,
     calculate_training_metrics,
+    _mamba_layer_macs,
+    _attention_layer_macs,
+    _linear_attention_layer_macs,
 )
 
 
@@ -352,14 +355,193 @@ def test_calculate_training_metrics_invalid_type():
     assert raised
 
 
+def test_mfu_registry_hybrid():
+    """'hybrid' and 'mamba' both map to the same strategy."""
+    assert "hybrid" in MFU_REGISTRY
+    assert "mamba" in MFU_REGISTRY
+    assert MFU_REGISTRY["hybrid"] is MFU_REGISTRY["mamba"]
+
+
+def _make_mamba_context(**overrides):
+    """Helper: build an MFUContext with Mamba2-like parameters."""
+    defaults = dict(
+        mfu_type="mamba",
+        peak_flops=300e12,
+        num_parameters=0,
+        num_hidden_layers=4,
+        num_attention_heads=12,
+        head_dim=128,
+        sequence_length=1024,
+        hidden_size=1536,
+        vocab_size=100352,
+        intermediate_size=512,
+        mamba_d_state=128,
+        mamba_chunk_size=256,
+        mamba_d_conv=4,
+        mamba_n_heads=48,
+        mamba_d_head=64,
+        mamba_n_groups=1,
+    )
+    defaults.update(overrides)
+    return MFUContext(**defaults)
+
+
+def test_mamba_layer_macs_formula():
+    """Verify _mamba_layer_macs matches a hand-computed reference (Mamba2-like)."""
+    ctx = _make_mamba_context()
+    d, e, g, n, h = 1536, 48 * 64, 1, 128, 48
+    expected = (
+        d * (2 * e + 2 * g * n + h)     # in_proj
+        + 4 * e                         # conv
+        + e * d                         # out_proj
+        + 2 * 256 * e                   # intra_chunk
+        + 2 * e * n                     # inter_chunk
+        + 3 * d * 512                   # mlp
+    )
+    assert _mamba_layer_macs(ctx) == expected
+
+
+def test_attention_layer_macs_formula():
+    """Verify _attention_layer_macs."""
+    ctx = _make_mamba_context()
+    d, s = 1536, 1024
+    expected = 4 * d * d + d * s + 3 * d * 512
+    assert _attention_layer_macs(ctx) == expected
+
+
+def test_linear_attention_layer_macs_formula():
+    """Verify _linear_attention_layer_macs matches reference calculation."""
+    ctx = MFUContext(
+        mfu_type="mamba",
+        peak_flops=300e12,
+        num_parameters=0,
+        num_hidden_layers=32,
+        num_attention_heads=30,
+        head_dim=128,
+        sequence_length=1024,
+        hidden_size=3840,
+        vocab_size=100352,
+        intermediate_size=11008,
+        linear_num_key_heads=30,
+        linear_num_value_heads=30,
+        linear_key_head_dim=96,
+        linear_value_head_dim=192,
+        linear_conv_kernel_dim=4,
+        linear_chunk_size=256,
+    )
+    d = 3840
+    k = 30 * 96   # 2880
+    v = 30 * 192  # 5760
+    h = 30
+    L = 256
+    expected = (
+        d * (2 * k + v + 2 * h)        # projections
+        + 4 * (2 * k + v)              # conv
+        + 2 * d * v                    # gate + out
+        + L * (3 * k + 2 * v)          # intra_chunk
+        + 3 * k * v // h               # inter_chunk
+        + 3 * d * 11008                # mlp
+    )
+    assert _linear_attention_layer_macs(ctx) == expected
+
+
+def test_mamba_mfu_pure():
+    """MFU for a pure Mamba model (no layer_types) produces a positive value."""
+    ctx = _make_mamba_context(num_hidden_layers=4, layer_types=())
+    metrics = calculate_training_metrics(ctx, micro_batch_size=4, gradient_accumulation_steps=1, world_size=1, dt=1.0)
+    assert metrics.mfu > 0
+
+
+def test_mamba_mfu_hybrid_layer_types():
+    """
+    Hybrid model: 3 mamba layers + 1 attention layer.
+    MFU should be greater than zero and differ from a pure-mamba calculation.
+    """
+    layer_types = ("mamba", "mamba", "mamba", "attention")
+    ctx_hybrid = _make_mamba_context(num_hidden_layers=4, layer_types=layer_types)
+    ctx_pure   = _make_mamba_context(num_hidden_layers=4, layer_types=())
+
+    m_hybrid = calculate_training_metrics(ctx_hybrid, 4, 1, 1, dt=1.0)
+    m_pure   = calculate_training_metrics(ctx_pure,   4, 1, 1, dt=1.0)
+
+    assert m_hybrid.mfu > 0
+    assert m_pure.mfu > 0
+    # They should differ because attention and mamba layers have different costs.
+    assert m_hybrid.mfu != m_pure.mfu
+
+
+def test_mamba_mfu_linear_attention_hybrid():
+    """MFU for a linear-attention + full-attention hybrid."""
+    layer_types = tuple(
+        "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+        for i in range(32)
+    )
+    ctx = MFUContext(
+        mfu_type="hybrid",
+        peak_flops=300e12,
+        num_parameters=0,
+        num_hidden_layers=32,
+        num_attention_heads=30,
+        head_dim=128,
+        sequence_length=1024,
+        hidden_size=3840,
+        vocab_size=100352,
+        intermediate_size=11008,
+        layer_types=layer_types,
+        linear_num_key_heads=30,
+        linear_num_value_heads=30,
+        linear_key_head_dim=96,
+        linear_value_head_dim=192,
+        linear_conv_kernel_dim=4,
+        linear_chunk_size=256,
+    )
+    metrics = calculate_training_metrics(ctx, micro_batch_size=4, gradient_accumulation_steps=1, world_size=1, dt=1.0)
+    assert metrics.mfu > 0
+
+
+def test_create_mfu_context_mamba_fields():
+    """create_mfu_context extracts mamba/linear-attention fields from args."""
+    args = TrainingArguments()
+    args.mfu_type = "mamba"
+    args.num_hidden_layers = 4
+    args.num_attention_heads = 12
+    args.head_dim = 128
+    args.max_position_embeddings = 1024
+    args.hidden_size = 1536
+    args.vocab_size = 100352
+    args.intermediate_size = 512
+    args.mamba_d_state = 128
+    args.mamba_n_heads = 48
+    args.mamba_d_head = 64
+    args.layer_types = ["mamba", "mamba", "mamba", "attention"]
+
+    ctx = create_mfu_context(args, "a100", num_parameters=0)
+
+    assert ctx.hidden_size == 1536
+    assert ctx.vocab_size == 100352
+    assert ctx.mamba_d_state == 128
+    assert ctx.mamba_n_heads == 48
+    assert ctx.layer_types == ("mamba", "mamba", "mamba", "attention")
+    # Fields not set on args should get defaults
+    assert ctx.linear_num_key_heads == 0
+
+
 for _fn in [
     test_peak_flops_registry,
     test_mfu_registry_dense,
+    test_mfu_registry_hybrid,
     test_create_mfu_context,
     test_create_mfu_context_unsupported_hardware,
     test_calculate_training_metrics,
     test_calculate_training_metrics_zero_dt,
     test_calculate_training_metrics_invalid_type,
+    test_mamba_layer_macs_formula,
+    test_attention_layer_macs_formula,
+    test_linear_attention_layer_macs_formula,
+    test_mamba_mfu_pure,
+    test_mamba_mfu_hybrid_layer_types,
+    test_mamba_mfu_linear_attention_hybrid,
+    test_create_mfu_context_mamba_fields,
 ]:
     run_test(_fn.__name__, _fn)
 
@@ -559,6 +741,9 @@ from model_setup import (
     _resolve_checkpoint_path,
     _build_model_from_config,
     _create_tokenizer,
+    _compute_active_trainable_params,
+    _try_create_distributed_config,
+    _check_kernels_available,
     prepare_training_components,
     ModelInitializationResult,
 )
@@ -672,6 +857,8 @@ def test_prepare_training_components_cpu():
         assert result.precision == torch.float32
         assert result.checkpoint_path is None
         assert result.trainable_params > 0
+        # Dense model: active params == total params
+        assert result.active_trainable_params == result.trainable_params
         # Runtime fields should be populated on args
         assert result.args.max_position_embeddings is not None
         assert result.args.vocab_size is not None
@@ -715,6 +902,137 @@ def test_create_tokenizer_no_source_raises():
     assert raised
 
 
+def _make_mock_config(**kwargs):
+    """Create a lightweight mock config object for _compute_active_trainable_params tests."""
+    class _Cfg:
+        pass
+    cfg = _Cfg()
+    for k, v in kwargs.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def test_active_params_dense_model():
+    """Dense models: active_trainable_params == trainable_params."""
+    cfg = _make_mock_config(hidden_size=2048, num_hidden_layers=24, intermediate_size=5632)
+    total = 1_000_000
+    assert _compute_active_trainable_params(cfg, total) == total
+
+
+def test_active_params_qwen_moe():
+    """
+    Qwen2MoE-style: num_experts, moe_intermediate_size, decoder_sparse_step.
+    """
+    cfg = _make_mock_config(
+        hidden_size=2048,
+        num_hidden_layers=24,
+        intermediate_size=5632,
+        num_experts=60,
+        num_experts_per_tok=4,
+        moe_intermediate_size=1408,
+        decoder_sparse_step=1,
+    )
+    total = 10_000_000
+    active = _compute_active_trainable_params(cfg, total)
+    # 24 MoE layers, 56 inactive experts each, 3*2048*1408 params per expert
+    params_per_expert = 3 * 2048 * 1408
+    expected_inactive = 24 * (60 - 4) * params_per_expert
+    assert active == total - expected_inactive
+    assert active < total
+
+
+def test_active_params_granite_moe():
+    """
+    Granite-style: num_local_experts, intermediate_size as per-expert size,
+    no moe_intermediate_size, no decoder_sparse_step.
+    """
+    cfg = _make_mock_config(
+        hidden_size=1536,
+        num_hidden_layers=40,
+        intermediate_size=512,
+        num_local_experts=64,
+        num_experts_per_tok=6,
+    )
+    total = 10_000_000
+    active = _compute_active_trainable_params(cfg, total)
+    params_per_expert = 3 * 1536 * 512
+    expected_inactive = 40 * (64 - 6) * params_per_expert
+    assert active == total - expected_inactive
+    assert active < total
+
+
+def test_active_params_single_expert_is_dense():
+    """A config with num_experts=1 is treated as dense."""
+    cfg = _make_mock_config(
+        hidden_size=2048,
+        num_hidden_layers=24,
+        intermediate_size=5632,
+        num_experts=1,
+        num_experts_per_tok=1,
+    )
+    total = 5_000_000
+    assert _compute_active_trainable_params(cfg, total) == total
+
+
+def test_try_create_distributed_config_disabled():
+    """When enable_expert_parallelism is False, returns None."""
+    result = _try_create_distributed_config(False, master_process=True)
+    assert result is None
+
+
+def test_try_create_distributed_config_enabled():
+    """
+    When enable_expert_parallelism is True, returns a DistributedConfig
+    if the import succeeds, or None with a warning if it fails.
+    """
+    result = _try_create_distributed_config(True, master_process=True)
+    # On older transformers, result will be None (graceful fallback).
+    # On newer transformers (>= 5.x), result will be a DistributedConfig.
+    try:
+        from transformers.distributed.configuration_utils import DistributedConfig
+        assert result is not None
+    except (ImportError, ModuleNotFoundError):
+        assert result is None
+
+
+def test_enable_expert_parallelism_spec_default():
+    """enable_expert_parallelism defaults to False in TrainingArguments."""
+    args = TrainingArguments()
+    assert args.enable_expert_parallelism is False
+
+
+def test_check_kernels_available_disabled():
+    """When use_kernels is False, returns False."""
+    assert _check_kernels_available(False, master_process=True) is False
+
+
+def test_check_kernels_available_enabled():
+    """
+    When use_kernels is True, returns True only if both the `kernels` package
+    and transformers' use_kernels kwarg are available.
+    """
+    result = _check_kernels_available(True, master_process=True)
+    # Graceful: result is True if both dependencies are met, False otherwise.
+    assert isinstance(result, bool)
+    try:
+        import kernels as _k  # noqa: F401
+        import inspect
+        from transformers import AutoModelForCausalLM as _A
+        sig = inspect.signature(_A.from_pretrained)
+        if "use_kernels" in sig.parameters:
+            assert result is True
+        else:
+            assert result is False
+    except (ImportError, ModuleNotFoundError):
+        assert result is False
+
+
+def test_use_kernels_spec_default():
+    """use_kernels defaults to False in TrainingArguments."""
+    args = TrainingArguments()
+    assert args.use_kernels is False
+
+
 for _fn in [
     test_resolve_checkpoint_path_none,
     test_resolve_checkpoint_path_with_steps,
@@ -724,6 +1042,16 @@ for _fn in [
     test_prepare_training_components_cpu,
     test_prepare_training_components_bf16,
     test_create_tokenizer_no_source_raises,
+    test_active_params_dense_model,
+    test_active_params_qwen_moe,
+    test_active_params_granite_moe,
+    test_active_params_single_expert_is_dense,
+    test_try_create_distributed_config_disabled,
+    test_try_create_distributed_config_enabled,
+    test_enable_expert_parallelism_spec_default,
+    test_check_kernels_available_disabled,
+    test_check_kernels_available_enabled,
+    test_use_kernels_spec_default,
 ]:
     run_test(_fn.__name__, _fn)
 
