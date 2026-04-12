@@ -6,14 +6,14 @@
 # Learn more about SLURM options at:
 # - https://slurm.schedmd.com/sbatch.html
 #############################################
-#SBATCH --account=ag_cst_gabriel           # <-- Change to your SLURM account
+#SBATCH --account=ag_bit_flek              # <-- Change to your SLURM account
 #SBATCH --partition=mlgpu_short            # <-- Change to your partition
 #SBATCH --job-name=synthetic-gen
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --threads-per-core=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=8:00:00
+#SBATCH --time=08:00:00
 #SBATCH --gres=gpu:a40:8
 #SBATCH --exclusive
 
@@ -22,55 +22,61 @@
 #############################################
 username="nklugeco_hpc"                    # <-- Change to the corresponding username that created the workspace
 file_system="scratch"                      # <-- Change to your filesystem
-workspace_name="polyglot_datasets"         # <-- Change to your workspace/project name
+workspace_name="poly_datasets"             # <-- Change to your workspace/project name
 
 workdir="/lustre/$file_system/data/$username-$workspace_name"
-mkdir -p "$workdir/synth/synth_logs"
+mkdir -p "$workdir/synth/.logs"
 cd "$workdir"
 ulimit -c 0
 
-out="$workdir/synth/synth_logs/out.$SLURM_JOB_ID"
-err="$workdir/synth/synth_logs/err.$SLURM_JOB_ID"
+out="$workdir/synth/.logs/out.$SLURM_JOB_ID"
+err="$workdir/synth/.logs/err.$SLURM_JOB_ID"
 
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_amd.sh                       # <-- Load necessary modules
-# python3 -m venv $workdir/.venv_amd                  # <-- Create virtual environment
-source $workdir/.venv_amd/bin/activate                # <-- Activate virtual environment
+source $workdir/.modules_amd.sh                      # <-- Load necessary modules
+# python3 -m venv "$workdir/.venv_synth"             # <-- Create a clean virtual environment
+source "$workdir/.venv_synth/bin/activate"           # <-- Activate virtual environment
 
 # pip3 install --upgrade pip --no-cache-dir
-# pip3 install torch==2.8.0 --no-cache-dir
-# pip3 install torchaudio==2.8.0 --no-cache-dir
-# pip3 install torchvision==0.23.0 --no-cache-dir
-# pip3 install transformers --no-cache-dir
-# pip3 install datatrove[inference] --no-cache-dir
-# pip3 install pyarrow --no-cache-dir
-# pip3 install xxhash --no-cache-dir
-# pip3 install vllm --no-cache-dir
+# pip3 install \
+#    "datatrove[io]" \
+#    "aiofiles" \
+#    "httpx" \
+#    "aiosqlite" \
+#    "vllm==0.19.0" \
+#    "transformers>=4.56.0,<5" \
+#    "huggingface-hub>=0.34.0,<1.0" \
+#    "bitsandbytes" \
+#    "numpy>=2.0.0,<2.3.0" \
+#    "typer" \
+#    "pyyaml" \
+#    "pandas" \
+#    --no-cache-dir
+# pip3 check
 
-export HF_TOKEN="your_hugging_face_token"               # <-- Change to your Hugging Face token
+export HF_TOKEN="<your-token-here>"                      # <-- Change to your Hugging Face token
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export HF_DATASETS_CACHE="$workdir/.cache/$SLURM_JOB_ID"
 export HUGGINGFACE_HUB_CACHE="$HF_DATASETS_CACHE"
 export TRITON_CACHE_DIR="$HF_DATASETS_CACHE/triton_cache"
-export CLEAN_CACHE="0"                                  # Set to "1" to clean cache after job completion
-export DP=8                                             # <-- Data parallelism across GPUs
-export TP=1                                             # <-- Tensor parallelism (for bigger models)
-export MODEL_NAME_OR_PATH="Qwen/Qwen3-4B-Instruct-2507" # <-- Change to your model name or path
-export DATASET_PATH="$workdir/portuguese/personas"      # <-- Change to your dataset path (directory with JSONL or Parquet files)
-export TEXT_COLUMN="text"                  # <-- Change to your dataset text column name
-export OUTPUT_DIR="$workdir/synth/personas_bio"    # <-- Change to your desired output directory
-export SYSTEM_PROMPT="Você é um gerador de livros auto biográficos. Seu objetivo é criar livros biográficos detalhados e precisos."          # <-- Change to your system prompt (or leave empty)
-export PROMPT_TEMPLATE="Cria um livro biográfico sobre está pessoa: [[DOCUMENT]]"   # <-- Optional: template with [[DOCUMENT]] placeholder (e.g. "Summarize: [[DOCUMENT]]")
-export MAX_TOKENS=4096                     # <-- Max output tokens per generation
-export MODEL_MAX_CONTEXT=8192              # <-- Maximum context length for the model
+export CLEAN_CACHE="0"                                   # Set to "1" to clean cache after job completion
+export DP=8                                              # <-- Data parallelism across GPUs
+export TP=1                                              # <-- Tensor parallelism (for bigger models)
+export MODEL_NAME_OR_PATH="Qwen/Qwen3-14B"               # <-- Change to your model name or path
+export DATASET_PATH="$workdir/synth/data"                # <-- Change to your dataset path (directory with JSONL or Parquet files)
+export TEXT_COLUMN="prompt"                              # <-- Change to your dataset text column name
+export OUTPUT_DIR="$workdir/synth/no_think"              # <-- Change to your desired output directory
+export SYSTEM_PROMPT=$(cat "$workdir/synth/SYSTEM.md")   # <-- Read system prompt from file
+export PROMPT_TEMPLATE=$(cat "$workdir/synth/PROMPT.md") # <-- Read prompt template from file (must contain [[DOCUMENT]] placeholder)
+export MAX_TOKENS=10000                     # <-- Max output tokens per generation
+export MODEL_MAX_CONTEXT=16384              # <-- Maximum context length for the model
 export TEMPERATURE=0.7
 export TOP_K=20
 export TOP_P=0.8
 export ROLLOUTS_PER_DOCUMENT=1
-export EXAMPLES_PER_CHUNK=500               # <-- Documents per checkpoint chunk
-export ENABLE_THINKING=""                   # <-- Set to any non-empty value (e.g. "1") to enable reasoning/thinking for models like Qwen3; leave empty to disable
+export EXAMPLES_PER_CHUNK=17500              # <-- Documents per checkpoint chunk
 mkdir -p "$OUTPUT_DIR"
 
 if [[ -n "$HF_TOKEN" ]]; then
@@ -97,11 +103,7 @@ fi
 if [[ -n "$PROMPT_TEMPLATE" ]]; then
     OPTIONAL_ARGS="$OPTIONAL_ARGS --prompt-template \"$PROMPT_TEMPLATE\""
 fi
-if [[ -n "$ENABLE_THINKING" ]]; then
-    OPTIONAL_ARGS="$OPTIONAL_ARGS --enable-thinking $ENABLE_THINKING"
-fi
 
-# Use eval to properly handle the optional arguments with spaces.
 eval python3 $workdir/synth/generate_datatrove.py \
     --input-path "$DATASET_PATH" \
     --prompt-column "$TEXT_COLUMN" \
