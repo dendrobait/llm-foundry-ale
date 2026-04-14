@@ -41,7 +41,9 @@ err="$workdir/run_outputs/err.$SLURM_JOB_ID"
 source $workdir/.modules_amd.sh
 # python3 -m venv $workdir/.venv_fsdp
 source $workdir/.venv_fsdp/bin/activate
+
 # pip3 install --upgrade pip
+# git clone --depth 1 --branch main https://github.com/Polygl0t/llm-foundry.git
 # pip3 install -e "$workdir/llm-foundry/.[distributed]" --no-cache-dir
 # pip3 install flash_attn==2.8.2 --no-build-isolation --no-cache-dir
 
