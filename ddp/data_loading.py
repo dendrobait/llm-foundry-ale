@@ -85,7 +85,7 @@ def _collect_dataset_files(paths, dataset_type):
             files.append(path)
         elif os.path.isdir(path):
             files += glob.glob(f"{path}/*.{dataset_type}")
-    return files
+    return sorted(files)
 
 
 def _load_sanity_check_datasets(args):
@@ -131,7 +131,7 @@ def _load_disk_datasets(args, logger=None, file_logger=None):
         np.random.shuffle(train_files)
 
     # Validation files.
-    val_files = glob.glob(f"{args.val_dataset_dir}/*.{dataset_type}")
+    val_files = sorted(glob.glob(f"{args.val_dataset_dir}/*.{dataset_type}"))
     assert len(val_files) > 0, (
         f"No {dataset_type} files found in val_dataset_dir: {args.val_dataset_dir}"
     )

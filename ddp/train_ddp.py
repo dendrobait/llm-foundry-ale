@@ -125,12 +125,14 @@ def main(specs, slurm_job_id, hardware):
     # - the precision (torch.bfloat16 or torch.float32).
     # - the checkpoint path (if resuming from checkpoint, otherwise None).
     # - the number of trainable parameters in the model (int).
+    # - the number of active trainable parameters in the model (int, counts only experts in MoE models).
     args = model_state.args
     tokenizer = model_state.tokenizer
     model = model_state.model
     precision = model_state.precision
     checkpoint_path = model_state.checkpoint_path
-    params = model_state.trainable_params
+    trainable_params = model_state.trainable_params
+    active_trainable_params = model_state.active_trainable_params
 
     if ddp:
         # Wrap the model with DistributedDataParallel (DDP).
@@ -271,7 +273,9 @@ def main(specs, slurm_job_id, hardware):
         logger.info(f"  Liger kernel | {args.use_liger_kernel}")
         logger.info(f"  Torch compile | {args.torch_compile}")
         logger.info(f"  MFU type | {args.mfu_type}")
-        logger.info(f"  Trainable parameters | {params:,}")
+        logger.info(f"  Trainable parameters | {trainable_params:,}")
+        if trainable_params != active_trainable_params:
+            logger.info(f"  Active trainable parameters (counting only experts in MoE models) | {active_trainable_params:,}")
         logger.info("="*50)
         optimizer_summary_lines = get_optimizer_summary_lines(args)
         logger.info(f"Optimizer Configuration ({optimizer_label}):")
@@ -312,7 +316,9 @@ def main(specs, slurm_job_id, hardware):
             file_logger.log_metadata(f"  Liger kernel | {args.use_liger_kernel}")
             file_logger.log_metadata(f"  Torch compile | {args.torch_compile}")
             file_logger.log_metadata(f"  MFU type | {args.mfu_type}")
-            file_logger.log_metadata(f"  Trainable parameters | {params:,}")
+            file_logger.log_metadata(f"  Trainable parameters | {trainable_params:,}")
+            if trainable_params != active_trainable_params:
+                file_logger.log_metadata(f"  Active trainable parameters (counting only experts in MoE models) | {active_trainable_params:,}")
             file_logger.log_metadata("="*50)
             file_logger.log_metadata(f"Optimizer Configuration ({optimizer_label}):")
             for line in optimizer_summary_lines:
@@ -335,7 +341,7 @@ def main(specs, slurm_job_id, hardware):
         # See the `mfu.py` script for details on what this function does.
         # Use active_trainable_params so MoE models count only the experts
         # that participate in each forward pass.
-        mfu_context = create_mfu_context(args=args, hardware=hardware, num_parameters=model_state.active_trainable_params)
+        mfu_context = create_mfu_context(args=args, hardware=hardware, num_parameters=active_trainable_params)
 
     # Create the Trainer and run the training loop.
     trainer = Trainer(

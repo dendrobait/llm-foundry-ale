@@ -44,10 +44,7 @@ import re
 import matplotlib.pyplot as plt
 
 
-# =============================================================================
 # CONSTANTS & PATTERNS
-# =============================================================================
-
 # Valid programming language tags for code block validation.
 # Used to detect malformed code blocks with invalid or corrupted language identifiers.
 # Includes common programming languages, markup languages, shell scripting, and config formats.
