@@ -1,38 +1,36 @@
 """
-Distributed Data Parallel (DDP) Training for Large Language Models
+Fully Sharded Data Parallel (FSDP) Training for Large Language Models
 
 Production-ready training script for transformer-based causal language models using
-PyTorch DDP with either standard AdamW or a hybrid Muon + Adam optimizer.
+PyTorch FSDP2 (fully_shard) with either standard AdamW or a hybrid Muon + Adam optimizer.
 Designed for multi-GPU, multi-node SLURM clusters.
 
 Modules:
 
 - `data_loading`: Dataset loading and DataLoader creation.
 - `mfu`: MFU calculation utilities for performance monitoring.
-- `model_setup`: Pre-DDP model and tokenizer initialization.
+- `model_setup`: Pre-FSDP model and tokenizer initialization, FSDP wrapping, and state-dict utilities.
 - `optimizers`: Optimizer and learning rate scheduler creation.
 - `specifications`: Dataclass definitions for training arguments.
-- `trainer`: Encapsulates the training and validation loop in a `Trainer` class.
+- `trainer`: Encapsulates the training and validation loop in a `FSDPTrainer` class.
 - `utils`: Logging, checkpointing, and miscellaneous utilities.
 
 How to Use:
 
-1. Configure `specifications.yaml` with your training settings, including dataset paths, 
+1. Configure `train_config.yml` with your training settings, including dataset paths, 
     model architecture, and optimization parameters.
 
 2. Launch the training script with SLURM, specifying the number of nodes and GPUs.
-    See the `train_ddp.sh` script for an example SLURM job submission.
+    See the `train_fsdp.sh` script for an example SLURM job submission.
 """
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch
 
 import argparse
 import os
 
-from model_setup import prepare_training_components
+from model_setup import prepare_training_components, apply_fsdp_wrapping
 from specifications import TrainingArguments
 from data_loading import prepare_dataloaders
-from trainer import Trainer
+from trainer import FSDPTrainer
 from mfu import create_mfu_context
 
 from optimizers import (
@@ -58,7 +56,7 @@ def main(specs, slurm_job_id, hardware):
     args = TrainingArguments.from_yaml(specs)
 
     # Initiate a logger for the training process.
-    logger = StructuredTrainingLogger.create_python_logger(f"DDP-Trainer-{slurm_job_id}-{args.stage_name}")
+    logger = StructuredTrainingLogger.create_python_logger(f"FSDP-Trainer-{slurm_job_id}-{args.stage_name}")
     
     # Initialize the distributed environment.
     # See the `DistributedEnvironment` class in `utils.py` for details on what this does.
@@ -68,14 +66,14 @@ def main(specs, slurm_job_id, hardware):
     # - device_type: the type of the device (e.g., "cuda" or "mps").
     # - world_size: the total number of processes across all nodes (int).
     # - master_process: a boolean indicating if this is the master process (rank 0).
-    # - ddp: a boolean indicating if Distributed Data Parallel (DDP) is being used.
+    # - fsdp: a boolean indicating if Fully Sharded Data Parallel (FSDP) is being used.
     env = DistributedEnvironment(logger)
     rank = env.rank
     device = env.device
     device_type = env.device_type
     world_size = env.world_size
     master_process = env.master_process
-    ddp = env.ddp
+    fsdp = env.fsdp
 
     # Setup Triton cache before any GPU operations.
     setup_triton_cache()
@@ -117,7 +115,7 @@ def main(specs, slurm_job_id, hardware):
     # It returns:
     # - the updated `args` object.
     # - the tokenizer (a HuggingFace tokenizer object).
-    # - the model (a PyTorch nn.Module object, still unwrapped in DDP).
+    # - the model (a PyTorch nn.Module object, on device but not yet FSDP-wrapped).
     # - the precision (torch.bfloat16 or torch.float32).
     # - the checkpoint path (if resuming from checkpoint, otherwise None).
     # - the number of trainable parameters in the model (int).
@@ -130,56 +128,49 @@ def main(specs, slurm_job_id, hardware):
     trainable_params = model_state.trainable_params
     active_trainable_params = model_state.active_trainable_params
 
-    if ddp:
-        # Wrap the model with DistributedDataParallel (DDP).
-        # DDP enables multi-process, multi-GPU training by replicating the model
-        # across processes, synchronizing gradients between them, and ensuring
-        # efficient scaling across devices. Each process is responsible for one
-        # GPU and communicates with others to keep model replicas in sync.
+    if fsdp:
+        # Apply FSDP2 wrapping (fully_shard) to the model.
+        # This shards parameters, gradients, and optimizer states across all ranks,
+        # enabling training of models that exceed a single GPU's memory.
         #
         #        +---------+    +---------+    +---------+
         #        | Rank 0  |    | Rank 1  |    | Rank 2  |
         #        |  GPU 0  |    |  GPU 1  |    |  GPU 2  |
-        #        | Model   |    | Model   |    | Model   |
+        #        | Shard A |    | Shard B |    | Shard C |
         #        +---------+    +---------+    +---------+
         #            \             |             /
         #             \            |            /
         #              \           |           /
         #               +---------------------+
-        #               | Gradient All-Reduce |
+        #               |   All-Gather /      |
+        #               |   Reduce-Scatter    |
         #               +---------------------+
         #
-        # Key arguments here:
-        #    - device_ids: Pin each process to a specific GPU based on its rank.
-        #    - static_graph: 
-        #        Enables optimizations for models with a fixed forward/backward
-        #        graph (no dynamic control flow). Should be False when using
-        #        gradient accumulation or dynamic graphs, since it may otherwise
-        #        skip needed synchronizations.
-        #    - gradient_as_bucket_view:
-        #        Lets gradients be viewed directly from the communication buckets 
-        #        to save memory. More efficient, but may complicate custom 
-        #        gradient handling.
-        # Note:
-        #     Gradient accumulation can break if `static_graph=True`
-        #     (see https://github.com/pytorch/pytorch/issues/143580).
-        #Reference: https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html
-        model = DDP(
-            model, 
-            device_ids=[rank % torch.cuda.device_count()],
-            static_graph=args.static_graph,
-            gradient_as_bucket_view=True,
-        ) 
+        # See `apply_fsdp_wrapping()` in `model_setup.py` for details.
+        # It returns the effective world_size (adjusted for HSDP when dp_shard is set).
+        effective_world_size = apply_fsdp_wrapping(
+            model=model,
+            args=args,
+            device_type=device_type,
+            world_size=world_size,
+            rank=rank,
+            master_process=master_process,
+            logger=logger,
+            file_logger=file_logger if master_process else None,
+        )
+        # For HSDP, the effective world_size is smaller than the total world_size.
+        # We use the effective world_size for gradient accumulation and data loading.
+        world_size = effective_world_size
 
-    # Unwrap version of the model if it is wrapped in DDP.
-    raw_model = model.module if ddp else model 
+    # Compute the sampler rank, adjusting for HSDP if applicable.
+    sampler_rank = rank // args.dp_shard if args.dp_shard else rank
 
     # See the `data_loading.py` module for details on dataset loading and dataloader creation.
     data = prepare_dataloaders(
         args=args,
         tokenizer=tokenizer,
         world_size=world_size,
-        rank=rank,
+        rank=sampler_rank,
         logger=logger if master_process else None,
         file_logger=file_logger if master_process else None,
     )
@@ -273,6 +264,13 @@ def main(specs, slurm_job_id, hardware):
         if trainable_params != active_trainable_params:
             logger.info(f"  Active trainable parameters (counting only experts in MoE models) | {active_trainable_params:,}")
         logger.info("="*50)
+        logger.info("FSDP Configuration:")
+        logger.info(f"  Full shard (ZeRO-3) | {args.full_shard}")
+        logger.info(f"  Mixed precision | {args.fsdp_mixed_precision}")
+        logger.info(f"  CPU offload | {args.cpu_offload}")
+        logger.info(f"  DP shard (HSDP) | {args.dp_shard if args.dp_shard else 'None'}")
+        logger.info(f"  Explicit prefetching | {args.explicit_prefetching}")
+        logger.info("="*50)
         optimizer_summary_lines = get_optimizer_summary_lines(args)
         logger.info(f"Optimizer Configuration ({optimizer_label}):")
         for line in optimizer_summary_lines:
@@ -316,6 +314,13 @@ def main(specs, slurm_job_id, hardware):
             if trainable_params != active_trainable_params:
                 file_logger.log_metadata(f"  Active trainable parameters (counting only experts in MoE models) | {active_trainable_params:,}")
             file_logger.log_metadata("="*50)
+            file_logger.log_metadata("FSDP Configuration:")
+            file_logger.log_metadata(f"  Full shard (ZeRO-3) | {args.full_shard}")
+            file_logger.log_metadata(f"  Mixed precision | {args.fsdp_mixed_precision}")
+            file_logger.log_metadata(f"  CPU offload | {args.cpu_offload}")
+            file_logger.log_metadata(f"  DP shard (HSDP) | {args.dp_shard if args.dp_shard else 'None'}")
+            file_logger.log_metadata(f"  Explicit prefetching | {args.explicit_prefetching}")
+            file_logger.log_metadata("="*50)
             file_logger.log_metadata(f"Optimizer Configuration ({optimizer_label}):")
             for line in optimizer_summary_lines:
                 file_logger.log_metadata(line)
@@ -339,11 +344,10 @@ def main(specs, slurm_job_id, hardware):
         # that participate in each forward pass.
         mfu_context = create_mfu_context(args=args, hardware=hardware, num_parameters=active_trainable_params)
 
-    # Create the Trainer and run the training loop.
-    trainer = Trainer(
+    # Create the FSDPTrainer and run the training loop.
+    trainer = FSDPTrainer(
         args=args,
         model=model,
-        raw_model=raw_model,
         tokenizer=tokenizer,
         optimizer=optimizer,
         optimizer_step=optimizer_step,
@@ -358,7 +362,7 @@ def main(specs, slurm_job_id, hardware):
         epoch=epoch,
         device=device,
         device_type=device_type,
-        ddp=ddp,
+        fsdp=fsdp,
         world_size=world_size,
         master_process=master_process,
         precision=precision,
@@ -375,7 +379,7 @@ def main(specs, slurm_job_id, hardware):
     env.cleanup()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Distributed Data Parallel Training")
+    parser = argparse.ArgumentParser(description="Fully Sharded Data Parallel Training")
     parser.add_argument(
         "--specs",
         type=str,

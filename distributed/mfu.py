@@ -1,5 +1,5 @@
 """
-MFU calculation helpers for the DDP trainer.
+MFU calculation helpers for the distributed trainers.
 
 The strategy registry makes it straightforward to add alternative formulas for
 other architectures (MoE, Mamba, Hybrid) without changing the training loop.
@@ -92,7 +92,7 @@ def _mamba_layer_macs(ctx):
 
     # In-projection: d -> (2e + 2gn + h) for x, z, B, C, dt   (Eq. 9: d.p)
     in_proj = d * (2 * e + 2 * g * n + h)
-    # Depthwise conv1d: kernel_size × channels                 (Eq. 9: 4c with c=e)
+    # Depthwise conv1d: kernel_size x channels                 (Eq. 9: 4c with c=e)
     conv = ctx.mamba_d_conv * e
     # Out-projection: e -> d                                    (Eq. 9: e.d)
     out_proj = e * d
@@ -134,13 +134,13 @@ def _linear_attention_layer_macs(ctx):
 
     # Linear projections: Q, K (each d->k), V (d->v), 2 gating (d->h)   (Eq. 8)
     projections = d * (2 * k + v + 2 * h)
-    # Depthwise convs: kernel × (2k+v) channels                       (Eq. 8)
+    # Depthwise convs: kernel x (2k+v) channels                       (Eq. 8)
     conv = ctx.linear_conv_kernel_dim * (2 * k + v)
     # Gate projection (d->v) + output projection (v->d)                 (Eq. 8)
     gate_out = 2 * d * v
     # Intra-chunk overhead (Kernel, W/U, Attn)                         (Eq. 10)
     intra_chunk = L * (3 * k + 2 * v)
-    # Inter-chunk state passing: 3 mat-muls of size k_h × v_h per head (Eq. 10)
+    # Inter-chunk state passing: 3 mat-muls of size k_h x v_h per head (Eq. 10)
     inter_chunk = 3 * k * v // h if h > 0 else 0
     # MLP                                                              (Eq. 8)
     mlp = 3 * d * ctx.intermediate_size
@@ -171,7 +171,7 @@ def _mamba_mfu(context, micro_batch_size, gradient_accumulation_steps, dt):
         - Mamba2 training FLOPs:  Eq. 9 + 11 in mamba_flops.md
         - GDN training FLOPs:     Eq. 8 + 10 in mamba_flops.md
         - Attention FLOPs:        Eq. 7  in mamba_flops.md
-        - Overall formula:        Eq. 6  (F = 2 × total MACs per token)
+        - Overall formula:        Eq. 6  (F = 2 x total MACs per token)
         - source: https://arxiv.org/abs/2604.03444
     """
     d = context.hidden_size
@@ -189,9 +189,9 @@ def _mamba_mfu(context, micro_batch_size, gradient_accumulation_steps, dt):
         # No explicit layer_types -> assume every layer is Mamba2.
         total_layer_macs = context.num_hidden_layers * _mamba_layer_macs(context)
 
-    # FLOPs = 2 × MACs  (Eq. 6)
+    # FLOPs = 2 x MACs  (Eq. 6)
     flops_per_token = 2 * (lm_head_macs + total_layer_macs)
-    # Forward + backward ≈ 3 × forward
+    # Forward + backward ≈ 3 x forward
     flops_per_fwdbwd = 3 * flops_per_token * context.sequence_length
     flops_per_iter = flops_per_fwdbwd * (micro_batch_size * gradient_accumulation_steps)
     flops_achieved = flops_per_iter / dt

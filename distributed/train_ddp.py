@@ -12,7 +12,7 @@ Modules:
 - `model_setup`: Pre-DDP model and tokenizer initialization.
 - `optimizers`: Optimizer and learning rate scheduler creation.
 - `specifications`: Dataclass definitions for training arguments.
-- `trainer`: Encapsulates the training and validation loop in a `Trainer` class.
+- `trainer`: Encapsulates the training and validation loop in a `DDPTrainer` class.
 - `utils`: Logging, checkpointing, and miscellaneous utilities.
 
 How to Use:
@@ -32,7 +32,7 @@ import os
 from model_setup import prepare_training_components
 from specifications import TrainingArguments
 from data_loading import prepare_dataloaders
-from trainer import Trainer
+from trainer import DDPTrainer
 from mfu import create_mfu_context
 
 from optimizers import (
@@ -339,8 +339,8 @@ def main(specs, slurm_job_id, hardware):
         # that participate in each forward pass.
         mfu_context = create_mfu_context(args=args, hardware=hardware, num_parameters=active_trainable_params)
 
-    # Create the Trainer and run the training loop.
-    trainer = Trainer(
+    # Create the DDPTrainer and run the training loop.
+    trainer = DDPTrainer(
         args=args,
         model=model,
         raw_model=raw_model,
