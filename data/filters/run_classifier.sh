@@ -37,7 +37,7 @@ done
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_amd/bin/activate"
 
 export HF_TOKEN="<your-token-here>" # <-- Change to your HF token

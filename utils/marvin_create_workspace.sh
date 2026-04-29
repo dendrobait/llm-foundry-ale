@@ -1,7 +1,7 @@
 #!/bin/bash -l
 
 #############################################
-# Workspace Setup Script for HPC Usage
+# Workspace Setup Script for Marvin HPC Cluster
 #############################################
 # This script allocates a workspace on the Marvin HPC cluster,
 # clones the repository, and prepares the directory structure.
@@ -18,6 +18,8 @@ email="kluge@uni-bonn.de"      # <-- Change to your email
 remainder=7                    # <-- Change as needed
 num_days=90                    # <-- Change as needed
 workspace_name="polyglot"      # <-- Change to your workspace/project name
+
+# Workspace directory (constructed from the above variables)
 workdir="/lustre/$file_system/data/$username-$workspace_name"
 
 #############################################
@@ -41,6 +43,36 @@ git clone --branch main https://github.com/Polygl0t/llm-foundry.git
 echo "Workspace ready."
 
 #############################################
+# Stack Sourcing (.modules.sh)
+#############################################
+# Marvin has a dual software stack (AMD and Intel). Instead of two
+# separate module files, this repo ships a single auto-detecting
+# loader at the repository root: `.modules.sh`.
+#
+# How it picks a stack (first match wins):
+#
+#   1. $LLM_FOUNDRY_STACK is set to "amd" or "intel"   -> use it
+#   2. SLURM_JOB_GRES contains "gpu"  (--gres=gpu:...) -> AMD
+#   3. SLURM_JOB_PARTITION contains "gpu"              -> AMD
+#   4. Any other SLURM partition                       -> Intel
+#   5. No SLURM context (e.g. login node)              -> Intel + warning
+#
+# Inside a SLURM job, sbatch sets SLURM_JOB_GRES / SLURM_JOB_PARTITION
+# automatically from your #SBATCH directives, so the right stack is
+# selected without any extra configuration:
+#
+#   source $workdir/.modules.sh
+#
+# On a login node (no SLURM context) you must force the stack when
+# creating venvs or running interactive commands:
+#
+#   LLM_FOUNDRY_STACK=amd   source $workdir/.modules.sh
+#   LLM_FOUNDRY_STACK=intel source $workdir/.modules.sh
+#
+# When sourced, the script logs the chosen stack, the reason, and a
+# `module list` so the resolved environment is visible in your job log.
+
+#############################################
 # Installing Dependencies
 #############################################
 # Dependencies are managed via pyproject.toml with optional groups:
@@ -50,20 +82,24 @@ echo "Workspace ready."
 #   synth        - Synthetic data generation (torch, vllm, etc.)
 #   trl          - Fine-tuning with TRL (trl, vllm, flash_attn, etc.)
 #
-# Marvin uses a dual software stack (AMD and Intel). Each config
-# needs the correct modules and must be installed on the matching
-# node type so that hardware-specific packages resolve correctly.
+# Each config must be installed on the matching node type so that
+# hardware-specific packages (CUDA wheels, flash-attn, etc.) resolve
+# correctly. The `.modules.sh` loader handles stack selection for you;
+# you just need to submit the install job to the correct partition.
 #
-#   Config        Modules file         SLURM partition (recommended)
-#   ------        ------------         ---------------
-#   data          .modules_intel.sh    lm_short (Intel nodes)
-#   distributed   .modules_amd.sh     mlgpu_short (AMD/GPU nodes)
-#   synth         .modules_amd.sh     mlgpu_short (AMD/GPU nodes)
-#   trl           .modules_amd.sh     mlgpu_short (AMD/GPU nodes)
+#   Config        Stack       SLURM partition (recommended)
+#   ------        -----       ---------------
+#   data          intel       lm_short (Intel nodes)
+#   distributed   amd         mlgpu_short (AMD/GPU nodes)
+#   synth         amd         mlgpu_short (AMD/GPU nodes)
+#   trl           amd         mlgpu_short (AMD/GPU nodes)
 #
 # --- Step 1: Create a virtual environment (on the login node) ---
 #
-#   source $workdir/.modules_amd.sh          # or .modules_intel.sh for "data"
+# On the login node there is no SLURM context, so force the stack
+# explicitly via LLM_FOUNDRY_STACK before creating the venv:
+#
+#   LLM_FOUNDRY_STACK=amd source $workdir/.modules.sh   # or =intel for "data"
 #   python3 -m venv $workdir/.venv_<config>
 #   source $workdir/.venv_<config>/bin/activate
 #   pip install --upgrade pip
@@ -71,6 +107,10 @@ echo "Workspace ready."
 #   module purge
 #
 # --- Step 2: Install packages (as a SLURM job on the correct node) ---
+#
+# Inside the job, sbatch has set SLURM_JOB_GRES / SLURM_JOB_PARTITION
+# from your #SBATCH directives, so `.modules.sh` resolves the stack
+# automatically -- no LLM_FOUNDRY_STACK override needed.
 #
 #   sbatch --export=ALL <<'EOF'
 #   #!/bin/bash -l
@@ -86,14 +126,14 @@ echo "Workspace ready."
 #   #SBATCH --gres=gpu:a40:1               # We only need a GPU for the "distributed", "synth", and "trl" configs to resolve hardware-specific packages. Omit for "data".
 #   #SBATCH --oversubscribe
 #
-#   source $workdir/.modules_amd.sh        # or .modules_intel.sh
+#   source $workdir/.modules.sh        # auto-detects the stack inside the job
 #   source $workdir/.venv_<config>/bin/activate
 #   pip install -e /path/to/llm-foundry/.[<config>]
 #   EOF
 #
 # Example — installing the "distributed" config:
 #
-#   source $workdir/.modules_amd.sh
+#   LLM_FOUNDRY_STACK=amd source $workdir/.modules.sh
 #   python3 -m venv $workdir/.venv_distributed
 #   source $workdir/.venv_distributed/bin/activate
 #   pip install --upgrade pip
@@ -114,7 +154,7 @@ echo "Workspace ready."
 #   #SBATCH --gres=gpu:a40:1
 #   #SBATCH --oversubscribe
 #
-#   source /lustre/mlnvme/data/nklugeco_hpc-polyglot/.modules_amd.sh
+#   source /lustre/mlnvme/data/nklugeco_hpc-polyglot/.modules.sh
 #   source /lustre/mlnvme/data/nklugeco_hpc-polyglot/.venv_distributed/bin/activate
 #   pip install -e /lustre/mlnvme/data/nklugeco_hpc-polyglot/llm-foundry/.[distributed]
 #   pip install flash_attn==2.8.2 --no-build-isolation --no-cache-dir

@@ -34,7 +34,7 @@ err="$workdir/run_outputs/err-train-hf-tok.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_intel.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_intel/bin/activate"
 # pip3 install sentencepiece==0.2.0 transformers --no-cache-dir
 

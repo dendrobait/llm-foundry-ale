@@ -43,20 +43,32 @@ LLM Foundry runs on the [Marvin cluster](https://www.hpc.uni-bonn.de/) (Universi
 
 In short:
 
-- The modules for your stack (AMD or Intel) are defined in `.modules_amd.sh` and `.modules_intel.sh`. Source the appropriate one to load the correct environment. You **don't** need to do this on your local machine - only on the cluster.
+- **Create a workspace on the cluster.** Use `utils/marvin_create_workspace.sh` to allocate a workspace, clone the repository, and prepare the directory layout. Open the script first and edit the user customization section at the top (`username`, `file_system`, `work_group`, `email`, `workspace_name`) to match your account, then run it from a Marvin login node:
 
     ```bash
-    # Load the correct modules for your stack (AMD or Intel)
-    source .modules_amd.sh   # or .modules_intel.sh
-
+    bash utils/marvin_create_workspace.sh
     ```
 
-- The installation script `installation.sh` is only for setting up a new workspace on the cluster. If you are developing locally, you can install the dependencies directly with pip (see below). If you're working on the cluster, run the installation script to set up your workspace and install the dependencies:
+    The script also contains commented step-by-step instructions for creating the per-config virtual environments (`.venv_data`, `.venv_distributed`, `.venv_synth`, `.venv_trl`) and submitting the `pip install` jobs to the right partition. You **don't** need any of this on your local machine - only on the cluster.
+
+- **Stack sourcing.** Marvin has a dual software stack (AMD and Intel). The single `.modules.sh` file at the repository root loads the right one for you. It auto-detects the stack from the SLURM environment so most of the time you just source it and forget about it:
 
     ```bash
-    # Run the installation helper
-    bash installation.sh
+    # Inside a SLURM job: auto-detected from #SBATCH directives
+    #   - GPU job (--gres=gpu:...)             -> AMD
+    #   - partition name contains "gpu"        -> AMD
+    #   - any other partition                  -> Intel
+    source "$workdir/.modules.sh"
     ```
+
+    On a login node there is no SLURM context, so you must force the stack explicitly when creating venvs or running ad-hoc commands:
+
+    ```bash
+    LLM_FOUNDRY_STACK=amd   source "$workdir/.modules.sh"   # GPU/training stack
+    LLM_FOUNDRY_STACK=intel source "$workdir/.modules.sh"   # CPU/data stack
+    ```
+
+    Sourcing prints which stack was selected, why, and the resulting `module list`, so your job logs always show the resolved environment.
 
 To install a specific set of dependencies (e.g., for training or data processing), use the extras defined in `pyproject.toml`:
 

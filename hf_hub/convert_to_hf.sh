@@ -34,7 +34,7 @@ err="$workdir/run_outputs/err-convert-local-to-hf.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_intel.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_intel/bin/activate"
 
 export HF_DATASETS_CACHE="$workdir/.cache/$SLURM_JOB_ID"

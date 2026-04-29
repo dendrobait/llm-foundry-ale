@@ -60,7 +60,7 @@ err="$workdir/run_outputs/err-pdf-to-markdown.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 # python3 -m venv "$workdir/.venv_amd_pdf"
 source "$workdir/.venv_amd_pdf/bin/activate"
 # pip3 install marker-pdf --no-cache-dir

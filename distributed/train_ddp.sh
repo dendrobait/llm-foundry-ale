@@ -38,7 +38,7 @@ err="$workdir/run_outputs/err.$SLURM_JOB_ID"
 # Python 3.12, CUDA 12.6, PyTorch 2.8, and CXX11 ABI set to TRUE.
 #############################################
 
-source $workdir/.modules_amd.sh
+source $workdir/.modules.sh
 # python3 -m venv $workdir/.venv_ddp
 source $workdir/.venv_ddp/bin/activate
 

@@ -43,7 +43,7 @@ err="$workdir/run_outputs/err-dpo-trainer.$SLURM_JOB_ID"
 # - NCCL Documentation:
 # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html
 #############################################
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 # python3 -m venv $workdir/.venv_trl
 source "$workdir/.venv_trl/bin/activate"
 

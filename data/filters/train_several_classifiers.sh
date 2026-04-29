@@ -46,7 +46,7 @@ done
 # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html
 #############################################
 
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_amd/bin/activate"
 
 export HF_TOKEN="<your-token-here>" # <-- Change to your HF token

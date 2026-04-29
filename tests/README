@@ -29,8 +29,12 @@ Or run a single script directly:
     python tests/tests_synthetic.py
 
 
+To run tests regarding the module loading logic on Marvin's dual stack (Intel|AMD CPU and NVIDIA GPU), use the following scripts:
+
+    bash tests/test_modules_cpu.sh
+    bash tests/test_modules_gpu.sh
+
 Notes
 -----
 
 * All test scripts set `sys.pycache_prefix` to `tmp/pycache` in the Linux temp directory (via `tempfile.gettempdir()`).
-

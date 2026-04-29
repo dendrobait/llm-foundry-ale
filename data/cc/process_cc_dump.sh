@@ -34,7 +34,7 @@ err="$workdir/run_outputs/process-common-crawl-err.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_intel.sh
+source $workdir/.modules.sh
 #python3 -m venv $workdir/.venv_intel
 source $workdir/.venv_intel/bin/activate
 

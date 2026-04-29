@@ -33,7 +33,7 @@ err="$workdir/run_outputs/err-hf-upload-ckpts.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_intel.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_intel/bin/activate"
 
 export HF_TOKEN="<your-token-here>" # <-- Change to your HF token

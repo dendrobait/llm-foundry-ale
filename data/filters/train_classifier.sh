@@ -44,7 +44,7 @@ err="$workdir/run_training_outputs/err-train-classifier.$SLURM_JOB_ID"
 # - NCCL Documentation:
 # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html
 #############################################
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_amd/bin/activate"
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK

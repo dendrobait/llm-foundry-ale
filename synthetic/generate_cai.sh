@@ -35,7 +35,7 @@ err="$workdir/synth/logs/err-synthetic-cai.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_amd.sh
+source $workdir/.modules.sh
 # python3 -m venv $workdir/.venv_synth  
 source $workdir/.venv_synth/bin/activate
 

@@ -29,7 +29,7 @@ mkdir -p "$workdir/run_outputs"
 cd "$workdir"
 ulimit -c 0
 
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_amd/bin/activate"
 #pip3 install trl --no-cache-dir
 #pip3 install vllm==0.11.2 --no-cache-dir

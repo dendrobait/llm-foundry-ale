@@ -36,7 +36,7 @@ err="$workdir/run_outputs/err-gen.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_amd/bin/activate"
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK

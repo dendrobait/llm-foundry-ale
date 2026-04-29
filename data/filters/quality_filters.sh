@@ -34,7 +34,7 @@ err="$workdir/run_outputs/err-quality-filters.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_intel.sh
+source $workdir/.modules.sh
 source $workdir/.venv_intel/bin/activate
 # pip3 install datatrove[io,processing] --no-cache-dir
 # pip3 install indic-nlp-library --no-cache-dir

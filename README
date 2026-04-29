@@ -30,16 +30,16 @@ All of our code base is made to run on the Marvin cluster (University of Bonn).
 Installation
 ------------
 
-You can use the `installation.sh` to help you create workspaces in Marvin. Marvin has a dual stack setup (Intel / AMD), so make sure to create your local environments with this in mind (see `installation.sh` for details).
+You can use the `utils/marvin_create_workspace.sh` to help you create workspaces in Marvin. Marvin has a dual stack setup (Intel / AMD), so make sure to create your local environments with this in mind (see `utils/marvin_create_workspace.sh` for details).
 
-The `.modules_{amd|intel}.sh` file contains all the modules you need to load in order to run our code base in Marvins AMD or Intel stack (see `installation.sh` for details).
+The `.modules.sh` file at the repository root loads the modules needed to run our code base on Marvin. It auto-detects whether you are on the AMD or Intel stack based on the SLURM environment (GPU jobs and partitions whose name contains "gpu" -> AMD; everything else -> Intel). You can also force a stack by exporting `LLM_FOUNDRY_STACK=amd` or `LLM_FOUNDRY_STACK=intel` before sourcing it (useful on a login node when creating `venv` environments).
 
-You can also use the `pyproject.toml` to install certain specific/working builds of our code base. The `pyproject.toml` has currently some basic builds to work with:
+You can use the `pyproject.toml` to install certain specific/working builds of our code base. The `pyproject.toml` has currently some basic builds to work with:
 
 * `data`: For downloading and preprocessing datasets.
-* `distributed`: For training and evaluating language models with DDP and FSDP.
-* `synth`: For generating synthetic datasets with vLLM.
-* `trl`: For training and evaluating language models with TRL.
+* `distributed`: For training language models with our DDP and FSDP implementations.
+* `synth`: For generating synthetic samples with vLLM.
+* `trl`: For post-training and alignment with TRL.
 * `tests`: For running our test suite.
 
 Acknowledgments
