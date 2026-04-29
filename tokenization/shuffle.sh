@@ -34,7 +34,7 @@ err="$workdir/run_outputs/err-shuffle.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_intel.sh
+source $workdir/.modules.sh
 source $workdir/.venv_intel/bin/activate
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK

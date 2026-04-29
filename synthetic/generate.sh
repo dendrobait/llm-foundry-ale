@@ -37,7 +37,7 @@ done
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_amd.sh                       # <-- Load necessary modules
+source $workdir/.modules.sh                       # <-- Load necessary modules
 # python3 -m venv $workdir/.venv_synth                # <-- Create virtual environment
 source $workdir/.venv_synth/bin/activate              # <-- Activate virtual environment
 

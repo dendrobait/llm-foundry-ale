@@ -36,7 +36,7 @@ err="$workdir/run_outputs/err-alpaca.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_amd/bin/activate"
 # pip3 install alpaca-eval --no-cache-dir
 

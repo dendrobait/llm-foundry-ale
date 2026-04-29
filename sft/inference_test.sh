@@ -33,7 +33,7 @@ err="$workdir/run_outputs/err-inference.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source "$workdir/.modules_amd.sh"
+source "$workdir/.modules.sh"
 source "$workdir/.venv_amd/bin/activate"
 pip3 install json-repair --no-cache-dir
 

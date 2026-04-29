@@ -33,7 +33,7 @@ err="$workdir/run_outputs/err_merge.$SLURM_JOB_ID"
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_intel.sh
+source $workdir/.modules.sh
 # python3 -m venv $workdir/.venv_intel_merge
 source $workdir/.venv_intel_merge/bin/activate
 

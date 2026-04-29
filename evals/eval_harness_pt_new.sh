@@ -39,7 +39,7 @@ ulimit -c 0                                # <-- Disable core dumps (saves disk 
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules_amd.sh            # <-- Load required modules (Python, CUDA, etc.)
+source $workdir/.modules.sh            # <-- Load required modules (Python, CUDA, etc.)
 # python3 -m venv $workdir/.venv_eval_pt   # <-- UNCOMMENT on first run to create virtual environment
 source $workdir/.venv_eval_pt/bin/activate  # <-- Activate the virtual environment
 
