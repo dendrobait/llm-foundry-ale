@@ -1,62 +1,65 @@
-LLM Foundry
+# LLM Foundry
 
-Overview
---------
+LLM Foundry is the source repository for the development of models, datasets, and accompanying artifacts of the **Polyglot** project at the University of Bonn. It bundles training, evaluation, post-training, data processing, and tokenization pipelines into a single, cluster-ready code base.
 
-This repository contains all source code used for the development of the models, datasets, and all other accompanying artifacts tied to the Polygl0t project at the University of Bonn.
+## Table of Contents
 
+- [Overview](#overview)
+- [Repository Structure](#repository-structure)
+- [Installation](#installation)
+  - [Workspace Setup on Marvin](#workspace-setup-on-marvin)
+  - [Module Stack Selection](#module-stack-selection)
+  - [Installing Dependencies](#installing-dependencies)
+- [Running the Tests](#running-the-tests)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
+## Overview
+
+This repository contains all source code used for the development of the models, datasets, and all other accompanying artifacts tied to the Polyglot project at the University of Bonn. It is designed to run on the [Marvin cluster](https://www.hpc.uni-bonn.de/) (University of Bonn), which has a dual software stack (AMD and Intel) that the code base is aware of.
+
+## Repository Structure
 
 The code base is organized into the following main folders:
 
-* Data: Scripts for downloading and preprocessing datasets (e.g., HF Hub, Common Craul).
-* Distributed: Scripts for training and evaluating language models with DDP and FSDP.
-* DPO: Implementation for Direct Preference Optimization via TRL.
-* Evaluations: Scripts for evaluating language models via the lm-evaluation-harness.
-* Gym: Scripts for training and evaluating language models on custom environments (WIP).
-* hf_hub: Scripts for interacting with the Hugging Face Hub.
-* Merge: Scripts for running different merging techniques via mergekit.
-* SFT: Implementation of Supervised Fine-Tuning via TRL.
-* Synthetic: Scripts for generating synthetic datasets with vLLM.
-* Tests: Unit and integration tests for our code base.
-* Tokenization: Scripts for training, evaluating, and using tokenizers.
-* Utils: Some miscellaneous utilities for our code base.
+- [`data/`](data/) — Scripts for downloading and preprocessing datasets (e.g., HF Hub, Common Crawl).
+- [`distributed/`](distributed/) — Scripts for training and evaluating language models with DDP and FSDP.
+- [`dpo/`](dpo/) — Implementation for Direct Preference Optimization via TRL.
+- [`evals/`](evals/) — Scripts for evaluating language models via the `lm-evaluation-harness`.
+- [`gym/`](gym/) — Scripts for training and evaluating language models on custom environments (WIP).
+- [`hf_hub/`](hf_hub/) — Scripts for interacting with the Hugging Face Hub.
+- [`merge/`](merge/) — Scripts for running different merging techniques via `mergekit`.
+- [`sft/`](sft/) — Implementation of Supervised Fine-Tuning via TRL.
+- [`synthetic/`](synthetic/) — Scripts for generating synthetic datasets with vLLM.
+- [`tests/`](tests/) — Unit and integration tests for our code base.
+- [`tokenization/`](tokenization/) — Scripts for training, evaluating, and using tokenizers.
+- [`utils/`](utils/) — Miscellaneous utilities for our code base.
 
-All of our code base is made to run on the Marvin cluster (University of Bonn).
+## Installation
 
-Installation
-------------
+All of our codebase is designed to run on the Marvin cluster (University of Bonn). You will only need to set things up on the cluster itself - not on your local machine. For your local machine, you can just clone the repository and work with the files (e.g., editing code, writing new scripts, etc.) without worrying too much about dual stack setups or module loading.
 
-You can use the `installation.sh` to help you create workspaces in Marvin. Marvin has a dual stack setup (Intel / AMD), so make sure to create your local environments with this in mind (see `installation.sh` for details).
+### Workspace Setup on Marvin
 
-The `.modules_{amd|intel}.sh` file contains all the modules you need to load in order to run our code base in Marvins AMD or Intel stack (see `installation.sh` for details).
+Use [`utils/marvin_create_workspace.sh`](utils/marvin_create_workspace.sh) to allocate a workspace, clone the repository, and prepare the directory layout. Open the script first and edit the user customization section at the top (`username`, `file_system`, `work_group`, `email`, `workspace_name`) to match your account, then run it from a Marvin login node:
 
-You can also use the `pyproject.toml` to install certain specific/working builds of our code base. The `pyproject.toml` currently has some basic builds to work with:
-
-* `data`: For downloading and preprocessing datasets.
-* `distributed`: For training and evaluating language models with DDP and FSDP.
-* `synth`: For generating synthetic datasets with vLLM.
-* `trl`: For training and evaluating language models with TRL.
-* `tests`: For running our test suite.
-
-For more information on installation:[Installation](installation.sh)
+```bash
+bash utils/marvin_create_workspace.sh
 
 
-Contribution
-------------
-Thank you for your interest in contributing to LLM Foundry! Click below to learn more about how to contribute.
+## Contributing
 
-To learn more about contribution: [Contributing](CONTRIBUTING.md)  
+Contributions are welcome! Please see [`CONTRIBUTING.md`](CONTRIBUTING.md) for details on how to set up your development environment, the contribution workflow (forking, branching, squashing commits, opening a pull request), and the project's style guide.
 
+## License
 
-License
-------------
-Code is licensed under Apache License, Version 2.0 
+This project is licensed under the Apache License 2.0. See [`LICENSE`](LICENSE) for the full license text.
 
-
-Acknowledgments
--------------
+## Acknowledgments
 
 Polyglot is a project funded by the Federal Ministry of Education and Research (BMBF) and the Ministry of Culture and Science of the State of North Rhine-Westphalia (MWK) as part of TRA Sustainable Futures (University of Bonn) and the Excellence Strategy of the federal and state governments.
 
 We also gratefully acknowledge access to the Marvin cluster, hosted by the University of Bonn, along with support from its High Performance Computing & Analytics Lab.
+
 
