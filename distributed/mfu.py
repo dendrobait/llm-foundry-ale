@@ -204,7 +204,7 @@ def _mamba_mfu(context, micro_batch_size, gradient_accumulation_steps, dt):
     Supports pure Mamba2 models as well as hybrid models that mix
     Mamba2, full attention, and linear attention (GDN / DeltaNet) layers.
 
-    When ``context.layer_types`` is provided, per-layer costs are computed
+    When `context.layer_types` is provided, per-layer costs are computed
     according to each layer's type.  Otherwise all layers are assumed
     to be Mamba2.
 

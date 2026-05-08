@@ -15,7 +15,7 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     Create and return a logger with a consistent format.
 
     Args:
-        name: Logger name (typically __name__ of the calling module).
+        name: Logger name.
         level: Logging level (default: logging.INFO).
 
     Returns:

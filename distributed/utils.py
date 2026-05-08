@@ -246,7 +246,7 @@ def compute_training_schedule(args, train_dataloader_length, world_size):
     Compute gradient accumulation steps, steps per epoch, and total training steps.
 
     Returns a tuple of (gradient_accumulation_steps, num_update_steps_per_epoch, max_steps).
-    May update ``args.num_train_epochs`` in-place when ``args.max_steps`` overrides the schedule.
+    May update `args.num_train_epochs` in-place when `args.max_steps` overrides the schedule.
     """
     tokens_per_step = args.micro_batch_size * args.max_position_embeddings * world_size
     assert args.total_batch_size % tokens_per_step == 0, (
@@ -381,7 +381,7 @@ def initialize_wandb(args, slurm_job_id, max_steps):
     """
     Login to W&B and initialize a run.
 
-    Only call this on the master process and when ``args.wandb_token`` is not None.
+    Only call this on the master process and when `args.wandb_token` is not None.
 
     References:
         - [wandb.login](https://docs.wandb.ai/ref/python/sdk/functions/login)

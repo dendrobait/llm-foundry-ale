@@ -39,6 +39,7 @@ distributed = [
     "wandb==0.21.0",
     "pyyaml==6.0.2",
     "liger-kernel==0.7.0",
+    "kernels==0.13.0",
 ]
 synth = [
     "torch==2.8.0",

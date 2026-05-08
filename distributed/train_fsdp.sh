@@ -6,7 +6,7 @@
 # Learn more about SLURM options at:
 # - https://slurm.schedmd.com/sbatch.html
 #############################################
-#SBATCH --account=ag_cst_gabriel           # <-- Change to your SLURM account
+#SBATCH --account=ag_bit_flek              # <-- Change to your SLURM account
 #SBATCH --partition=sgpu_long              # <-- Change to your partition
 #SBATCH --job-name=fsdp-training
 #SBATCH --nodes=1
@@ -42,14 +42,24 @@ source $workdir/.modules.sh
 # python3 -m venv $workdir/.venv_fsdp
 source $workdir/.venv_fsdp/bin/activate
 
-# pip3 install --upgrade pip
-# git clone --depth 1 --branch main https://github.com/Polygl0t/llm-foundry.git
-# pip3 install -e "$workdir/llm-foundry/.[distributed]" --no-cache-dir
-
-# ALL HAIL FLASH-ATTN!
+# ===== ALL HAIL FLASH-ATTN! =====
 # Using the pre-built flash-attn wheel for CUDA 12.6 and PyTorch 2.8 with CXX11 ABI set to TRUE, which is compatible with our environment. 
 # If you have a different setup, please build flash-attn from source or find the appropriate wheel for your configuration.
 # pip3 install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl --no-cache-dir
+
+# ===== OPTIONAL: Specialized Attention Packages =====
+# These packages provide optimized CUDA kernels for specific attention mechanisms.
+# Uncomment only if your model uses the corresponding attention type.
+
+# Optional: For hybrid-mamba models (e.g., GraniteMoeHybridForCausalLM)
+# Install mamba-ssm with causal-conv1d for optimized Mamba layer kernels.
+# Uncomment the following line if using Mamba-based models:
+# pip3 install mamba-ssm[causal-conv1d] --no-build-isolation --no-cache-dir
+
+# Active: For linear attention mechanisms (delta rule, gated delta rule)
+# Models: OlmoHybridForCausalLM, Qwen3NextForCausalLM, and similar architectures
+# This significantly speeds up training for linear attention layers.
+# pip3 install flash-linear-attention --no-cache-dir
 
 #############################################
 # Environment Setup

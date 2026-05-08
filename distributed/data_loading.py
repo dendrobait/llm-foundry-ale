@@ -49,7 +49,7 @@ def create_collate_fn(mask_token_ids):
 
     This is the default collate function for the trainer. To swap in a different
     batching strategy (e.g., sequence packing), replace this factory with one that
-    returns a function matching the signature ``collate_fn(examples) -> batch``.
+    returns a function matching the signature `collate_fn(examples) -> batch`.
     """
     # Pre-compute a tensor of IDs to mask for efficient vectorized lookup.
     _mask_ids_tensor = torch.tensor(sorted(mask_token_ids), dtype=torch.long) if mask_token_ids else None
