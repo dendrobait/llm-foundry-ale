@@ -8,6 +8,7 @@ This folder contains miscellaneous utility scripts and helpers for working with 
 
 ## Contents
 
+- **count_tokens.py** — Creates a report of token counts for a given pretraining corpus.
 - **inspect_model.py** — Analyze model configurations and compute parameter counts (including MoE expert routing).
 - **marvin_create_workspace.sh** — A helper script to create a new workspace in the Marvin cluster.
 - **pdf2markdown.sh** — Convert PDF documents to Markdown format using Marker.

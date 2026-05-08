@@ -6,13 +6,13 @@
 # Learn more about SLURM options at:
 # - https://slurm.schedmd.com/sbatch.html
 #############################################
-#SBATCH --account=ag_cst_gabriel           # <-- Change to your SLURM account
-#SBATCH --partition=lm_long             # <-- Change to your partition
+#SBATCH --account=ag_bit_flek              # <-- Change to your SLURM account
+#SBATCH --partition=lm_short               # <-- Change to your partition
 #SBATCH --job-name=decontaminate
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=96
-#SBATCH --time=7-00:00:00
+#SBATCH --time=08:00:00
 #SBATCH --exclusive
 
 #############################################

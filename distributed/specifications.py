@@ -326,6 +326,15 @@ class TrainingArguments:
             "When True, the model will be loaded with `distributed_config=DistributedConfig(enable_expert_parallel=True)`. "
             "Requires a compatible version of transformers (>= 5.x). If the import fails, "
             "a warning is logged and training continues without expert parallelism."
+            "\n\nCAVEAT: EP shards experts across ranks and inserts two all-to-all collectives "
+            "per MoE layer (dispatch tokens to the rank owning each chosen expert, then gather "
+            "the outputs). This only pays off when expert replication is the actual bottleneck, "
+            "i.e. (a) the model is large enough that DDP-replicated experts dominate memory, "
+            "(b) you have many ranks so each rank owns a small slice of experts, and "
+            "(c) per-step compute >> all-to-all latency. On few GPUs (e.g. 2) and small MoE "
+            "models that already fit comfortably in VRAM, EP tends to be neutral or slightly "
+            "slower than plain DDP because you pay communication overhead for memory savings "
+            "you didn't need. Prefer EP for large MoE models on many ranks; skip it otherwise."
         )},
     )
     use_kernels: Optional[bool] = field(
@@ -336,6 +345,14 @@ class TrainingArguments:
             "automatically find and apply the best available kernel implementations. "
             "Requires the `kernels` package (>= 0.11.0) and a compatible version of transformers. "
             "If the import fails, a warning is logged and training continues without kernels."
+            "\n\nCAVEAT: Do NOT stack `use_kernels=True` on top of `use_liger_kernel=True` for the "
+            "same ops. Liger monkey-patches RMSNorm, SwiGLU, RoPE, cross-entropy, etc. with tightly "
+            "fused Triton kernels. The HF Hub `kernels` path then re-wraps those modules with "
+            "community kernels that are typically standalone (not fused with neighboring ops), "
+            "effectively downgrading Liger's fused stack to a looser one with more kernel launches "
+            "and larger saved activations. In practice this has been observed to INCREASE step "
+            "time and VRAM compared to Liger alone. Use `use_kernels` when (a) you "
+            "are not using Liger, or (b) you scope it to ops Liger does not patch."
         )},
     )
     

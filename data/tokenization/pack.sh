@@ -6,38 +6,37 @@
 # Learn more about SLURM options at:
 # - https://slurm.schedmd.com/sbatch.html
 #############################################
-#SBATCH --account=ag_cst_gabriel           # <-- Change to your SLURM account
-#SBATCH --partition=lm_long                # <-- Change to your partition
-#SBATCH --job-name=tokenization-pt
+#SBATCH --account=ag_bit_flek              # <-- Change to your SLURM account
+#SBATCH --partition=lm_short               # <-- Change to your partition
+#SBATCH --job-name=pack
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=96
-#SBATCH --time=7-00:00:00
-#SBATCH --mem=1900G
+#SBATCH --time=08:00:00
 #SBATCH --exclusive
 
 #############################################
 # Working Directory Setup
 #############################################
-username="nklugeco_hpc"                    # <-- Change to the corresponding username that created the workspace
-file_system="scratch"                      # <-- Change to your filesystem
-workspace_name="polyglot_datasets"        # <-- Change to your workspace/project name
+export username="nklugeco_hpc"                    # <-- Change to the corresponding username that created the workspace
+export file_system="mlnvme"                       # <-- Change to your filesystem
+export workspace_name="polyglot"                  # <-- Change to your workspace/project name
 
 workdir="/lustre/$file_system/data/$username-$workspace_name"
 mkdir -p "$workdir/run_outputs"
 cd "$workdir"
 ulimit -c 0
 
-out="$workdir/run_outputs/out-tok-pt.$SLURM_JOB_ID"
-err="$workdir/run_outputs/err-tok-pt.$SLURM_JOB_ID"
+out="$workdir/run_outputs/out-pack.$SLURM_JOB_ID"
+err="$workdir/run_outputs/err-pack.$SLURM_JOB_ID"
 
 #############################################
 # Environment Setup
 #############################################
-source $workdir/.modules.sh
-source $workdir/.venv_intel/bin/activate
+source "$workdir/.modules.sh"
+source "$workdir/.venv/bin/activate"
 
-export HF_TOKEN="<your-token-here>" # <-- Change to your HF token
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export HF_DATASETS_CACHE="$workdir/.cache/$SLURM_JOB_ID"
 export HUGGINGFACE_HUB_CACHE="$HF_DATASETS_CACHE"
 export CLEAN_CACHE="1"  # Set to "1" to clean cache after job completion
@@ -52,15 +51,12 @@ echo "# Python executable: $(which python3)" >> "$out"
 #############################################
 # Main Job Execution
 #############################################
-python3 "$workdir/tokenize_dataset_pt.py" \
-    --output_dir "$workdir/portuguese/tokenized/gigaverbo_v2" \
-    --cache_dir "$HF_DATASETS_CACHE" \
-    --datasets_dir "$workdir/portuguese/gigaverbo-v2/default" \
-    --input_type "jsonl" \
-    --text_column "text" \
-    --tokenizer_name "$workdir/portuguese/checkpoints/tokenizers/sp-bpe" \
+python3 $workdir/llm-foundry/data/tokenization/pack.py \
+    --input_path "$workdir/data/tokenized" \
+    --output_dir "$workdir/data/packed" \
+    --strategy concatenate \
     --block_size 4096 \
-    --token "$HF_TOKEN" \
+    --cache_dir "$HF_DATASETS_CACHE" \
     --num_proc $SLURM_CPUS_PER_TASK 1>>"$out" 2>>"$err"
 
 #############################################

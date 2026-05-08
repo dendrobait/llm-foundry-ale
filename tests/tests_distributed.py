@@ -107,7 +107,7 @@ def test_import_model_setup():
         apply_fsdp_wrapping,
         get_full_model_state_dict,
         get_full_optimizer_state_dict,
-        _get_decoder_layer_class,
+        _iter_transformer_blocks,
     )
 
 
@@ -970,7 +970,7 @@ from model_setup import (
     _compute_active_trainable_params,
     _try_create_distributed_config,
     _check_kernels_available,
-    _get_decoder_layer_class,
+    _iter_transformer_blocks,
     prepare_training_components,
     ModelInitializationResult,
 )
@@ -1262,38 +1262,43 @@ def test_use_kernels_spec_default():
     assert args.use_kernels is False
 
 
-def test_get_decoder_layer_class_llama():
-    """_get_decoder_layer_class returns LlamaDecoderLayer for 'llama'."""
-    cls = _get_decoder_layer_class("llama")
-    assert cls.__name__ == "LlamaDecoderLayer"
+def test_iter_transformer_blocks_returns_layers():
+    """_iter_transformer_blocks returns the ModuleList at model.model.layers."""
+    import torch.nn as nn
+
+    class _Inner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Linear(4, 4) for _ in range(3)])
+
+    class _Outer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = _Inner()
+            self.config = type("C", (), {"model_type": "fake"})()
+
+    m = _Outer()
+    layers = _iter_transformer_blocks(m)
+    assert layers is m.model.layers
+    assert len(layers) == 3
 
 
-def test_get_decoder_layer_class_qwen2():
-    """_get_decoder_layer_class returns Qwen2DecoderLayer for 'qwen2'."""
-    cls = _get_decoder_layer_class("qwen2")
-    assert cls.__name__ == "Qwen2DecoderLayer"
+def test_iter_transformer_blocks_missing_raises():
+    """_iter_transformer_blocks raises a clear error when the convention is broken."""
+    import torch.nn as nn
 
+    class _Bad(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = type("C", (), {"model_type": "weird"})()
 
-def test_get_decoder_layer_class_unsupported():
-    """_get_decoder_layer_class raises ValueError for unsupported model type."""
     raised = False
     try:
-        _get_decoder_layer_class("nonexistent_model_type")
+        _iter_transformer_blocks(_Bad())
     except ValueError as e:
         raised = True
-        assert "nonexistent_model_type" in str(e)
+        assert "model.model.layers" in str(e)
     assert raised
-
-
-def test_get_decoder_layer_class_caches():
-    """_get_decoder_layer_class caches results after first lookup."""
-    from model_setup import _DECODER_LAYER_MAP
-    # Clear cache for llama if present
-    _DECODER_LAYER_MAP.pop("llama", None)
-    cls1 = _get_decoder_layer_class("llama")
-    assert "llama" in _DECODER_LAYER_MAP
-    cls2 = _get_decoder_layer_class("llama")
-    assert cls1 is cls2
 
 
 if __name__ == "__main__":
@@ -1316,10 +1321,8 @@ if __name__ == "__main__":
         test_check_kernels_available_disabled,
         test_check_kernels_available_enabled,
         test_use_kernels_spec_default,
-        test_get_decoder_layer_class_llama,
-        test_get_decoder_layer_class_qwen2,
-        test_get_decoder_layer_class_unsupported,
-        test_get_decoder_layer_class_caches,
+        test_iter_transformer_blocks_returns_layers,
+        test_iter_transformer_blocks_missing_raises,
     ]:
         run_test(_fn.__name__, _fn)
 

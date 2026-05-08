@@ -313,10 +313,10 @@ def _try_create_distributed_config(enable_expert_parallelism, master_process, lo
 
 def _check_kernels_available(use_kernels, master_process, logger=None, file_logger=None):
     """
-    Check whether the ``kernels`` library and transformers' ``use_kernels``
+    Check whether the `kernels` library and transformers' `use_kernels`
     support are available.
 
-    Returns True if ``use_kernels`` was requested **and** both the ``kernels``
+    Returns True if `use_kernels` was requested **and** both the `kernels`
     package and the transformers kwarg are importable, False otherwise.
     """
     if not use_kernels:
@@ -391,9 +391,17 @@ def _compute_active_trainable_params(config, trainable_params):
     # SwiGLU MLP per expert: gate_proj + up_proj + down_proj
     params_per_expert = 3 * hidden_size * expert_intermediate_size
 
-    # Number of MoE layers (Qwen uses decoder_sparse_step; default = all layers).
+    # Number of MoE layers. Qwen-style configs use `decoder_sparse_step` (every
+    # k-th layer is MoE) and `mlp_only_layers` (explicit indices that use a
+    # dense MLP instead of MoE). Both are honored when present; otherwise the
+    # default assumption is that every layer is a MoE layer.
     decoder_sparse_step = getattr(config, 'decoder_sparse_step', 1) or 1
-    num_moe_layers = config.num_hidden_layers // decoder_sparse_step
+    mlp_only_layers = set(getattr(config, 'mlp_only_layers', None) or [])
+    num_moe_layers = sum(
+        1 for layer_idx in range(config.num_hidden_layers)
+        if layer_idx not in mlp_only_layers
+        and (layer_idx + 1) % decoder_sparse_step == 0
+    )
 
     inactive_params = num_moe_layers * (num_experts - num_experts_per_tok) * params_per_expert
     return trainable_params - inactive_params
@@ -442,7 +450,22 @@ def prepare_training_components(args, device, master_process, logger=None, file_
     # These are no-ops for the dense_transformer path.
     args.hidden_size = getattr(model.config, 'hidden_size', 0)
     args.intermediate_size = getattr(model.config, 'intermediate_size', 0)
-    args.layer_types = tuple(getattr(model.config, 'layer_types', ()) or ())
+    # `layer_types` is the canonical (HF) field listing each block's flavour
+    # (`mamba` / `attention` / `full_attention` / `linear_attention`). Some
+    # configs (e.g. Qwen3Next) instead encode the schedule as
+    # `full_attention_interval`: every k-th layer is full attention and the
+    # rest are linear attention. Synthesize `layer_types` in that case so the
+    # structural MFU path works without per-architecture special casing.
+    layer_types = tuple(getattr(model.config, 'layer_types', ()) or ())
+    if not layer_types:
+        full_attention_interval = getattr(model.config, 'full_attention_interval', None)
+        if full_attention_interval and full_attention_interval > 0:
+            layer_types = tuple(
+                "full_attention" if (layer_idx + 1) % full_attention_interval == 0
+                else "linear_attention"
+                for layer_idx in range(model.config.num_hidden_layers)
+            )
+    args.layer_types = layer_types
     # Mamba2 hyperparameters (only present on mamba/hybrid configs).
     args.mamba_d_state = getattr(model.config, 'mamba_d_state', 0)
     args.mamba_chunk_size = getattr(model.config, 'mamba_chunk_size', 256)
@@ -467,7 +490,14 @@ def prepare_training_components(args, device, master_process, logger=None, file_
             or getattr(model.config, 'intermediate_size', 0)
             or 0
         )
-        args.shared_intermediate_size = getattr(model.config, 'shared_intermediate_size', 0) or 0
+        # Shared-expert intermediate size has at least two naming conventions:
+        # `shared_intermediate_size` (Granite-MoE-Hybrid) and
+        # `shared_expert_intermediate_size` (Qwen-MoE / Qwen3Next).
+        args.shared_intermediate_size = (
+            getattr(model.config, 'shared_intermediate_size', None)
+            or getattr(model.config, 'shared_expert_intermediate_size', None)
+            or 0
+        )
     else:
         args.num_experts_per_tok = 0
         args.moe_intermediate_size = 0
@@ -568,38 +598,30 @@ from torch.distributed.fsdp import CPUOffloadPolicy
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.device_mesh import init_device_mesh
 
-# Decoder layer classes used to identify which sub-modules should be
-# individually sharded by FSDP.  Add more mappings as needed.
-_DECODER_LAYER_MAP = {}
-
-def _get_decoder_layer_class(model_type):
+def _iter_transformer_blocks(model):
     """
-    Lazily import and return the decoder layer class for a given model type.
-    Caches the result in _DECODER_LAYER_MAP.
+    Yield every transformer block that should be individually sharded by FSDP.
+
+    Modern HF causal-LM models (dense, MoE, mamba, hybrid) all expose their
+    per-layer blocks under `model.model.layers` as a `ModuleList`. Sharding
+    every entry in that list is the standard FSDP2 idiom (cf. the official
+    PyTorch FSDP2 tutorial and torchtitan), and is architecture-agnostic: it
+    works for dense, MoE, mamba, and hybrid models without registering any
+    decoder-layer class up front.
+
+    This helper centralizes the assumption and provides a clearer error if a
+    new architecture deviates from it.
     """
-    if model_type in _DECODER_LAYER_MAP:
-        return _DECODER_LAYER_MAP[model_type]
-
-    _import_map = {
-        "smollm3": ("transformers.models.smollm3.modeling_smollm3", "SmolLM3DecoderLayer"),
-        "llama": ("transformers.models.llama.modeling_llama", "LlamaDecoderLayer"),
-        "gemma3_text": ("transformers.models.gemma3.modeling_gemma3", "Gemma3DecoderLayer"),
-        "qwen3": ("transformers.models.qwen3.modeling_qwen3", "Qwen3DecoderLayer"),
-        "qwen2": ("transformers.models.qwen2.modeling_qwen2", "Qwen2DecoderLayer"),
-    }
-
-    if model_type not in _import_map:
+    inner = getattr(model, "model", None)
+    layers = getattr(inner, "layers", None) if inner is not None else None
+    if layers is None:
         raise ValueError(
-            f"Unsupported model_type '{model_type}' for FSDP decoder-layer sharding. "
-            f"Supported types: {sorted(_import_map)}. "
-            f"Add your model's decoder layer class to the mapping in model_setup.py."
+            f"Model of type '{getattr(model.config, 'model_type', type(model).__name__)}' "
+            f"does not expose `model.model.layers`. FSDP wrapping in this codebase "
+            f"assumes that convention. Update `_iter_transformer_blocks` if your model "
+            f"places its decoder blocks elsewhere."
         )
-
-    module_path, class_name = _import_map[model_type]
-    mod = importlib.import_module(module_path)
-    cls = getattr(mod, class_name)
-    _DECODER_LAYER_MAP[model_type] = cls
-    return cls
+    return layers
 
 
 def _set_modules_to_forward_prefetch(model, num_to_forward_prefetch):
@@ -630,7 +652,7 @@ def apply_fsdp_wrapping(model, args, device_type, world_size, rank, master_proce
 
     This function shards each decoder layer individually, then shards the root
     model.  It supports mixed precision, CPU offload, HSDP (2-D device mesh),
-    and explicit prefetching — all controlled by the fields on ``args``.
+    and explicit prefetching — all controlled by the fields on `args`.
 
     Returns:
         effective_world_size (int): The data-parallel world size after accounting
@@ -695,11 +717,19 @@ def apply_fsdp_wrapping(model, args, device_type, world_size, rank, master_proce
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy(pin_memory=True)
         _log_message(master_process, logger, file_logger, "Enabled CPU offload policy for FSDP.")
 
-    # Per-layer sharding (bottom-up, as required by FSDP2)
-    decoder_cls = _get_decoder_layer_class(model.config.model_type)
-    for layer in model.model.layers:
-        if isinstance(layer, decoder_cls):
-            fully_shard(layer, **fsdp_kwargs)
+    # Per-layer sharding (bottom-up, as required by FSDP2). We wrap every
+    # block in `model.model.layers` regardless of its concrete class. This is
+    # architecture-agnostic and supports dense, MoE, mamba, and hybrid models
+    # (e.g. OlmoHybrid, GraniteMoeHybrid, Qwen3Next) without needing to
+    # register their decoder-layer class first.
+    layer_classes = set()
+    for layer in _iter_transformer_blocks(model):
+        fully_shard(layer, **fsdp_kwargs)
+        layer_classes.add(type(layer).__name__)
+    _log_message(
+        master_process, logger, file_logger,
+        f"FSDP per-layer sharding applied to block classes: {sorted(layer_classes)}.",
+    )
 
     # Shard the root model (covers embeddings, output projection, etc.).
     fully_shard(model, **fsdp_kwargs)
