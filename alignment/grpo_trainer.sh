@@ -62,9 +62,13 @@ source "$workdir/.venv_trl/bin/activate"
 # pip3 install 'trl[vllm]' --no-cache-dir
 
 # ===== OPTIONAL: Specialized Attention Packages =====
+# These packages provide optimized CUDA kernels for specific attention mechanisms.
 # Uncomment only if your model uses the corresponding attention type.
-# pip3 install mamba-ssm[causal-conv1d] --no-build-isolation --no-cache-dir
+
+# Flash Linear Attention (for fast linear attention implementations)
+# Causal Conv1D (for models using causal convolutional layers instead of standard attention)
 # pip3 install flash-linear-attention --no-cache-dir
+# pip3 install causal-conv1d --no-build-isolation --no-cache-dir
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export HF_DATASETS_CACHE="$workdir/.cache/$SLURM_JOB_ID"
@@ -91,6 +95,7 @@ export CHECKPOINT_DIR="./checkpoints/MyModel-GRPO-$SLURM_JOB_ID"
 export CLEAN_CACHE="1"  # <-- Set to "1" to clean cache after job completion
 export VLLM_PORT="8000"
 export VLLM_BIND_HOST="0.0.0.0"
+export VLLM_GPU_MEMORY_UTILIZATION="0.3"
 export VLLM_STARTUP_WAIT="60"  # Seconds to wait for vLLM to load the model before training starts
 
 hf auth login --token "$HF_TOKEN"
@@ -125,7 +130,7 @@ if [ "$SLURM_NNODES" -eq 1 ]; then
 else
     vllm_cuda_visible_devices=$(seq -s, 0 $(($SLURM_NTASKS_PER_NODE - 1)))
     vllm_tensor_parallel_size=$SLURM_NTASKS_PER_NODE
-    vllm_gpu_memory_utilization=0.9
+    VLLM_GPU_MEMORY_UTILIZATION=0.9
     trainer_gpu_ids="all"
     train_num_machines=$(($SLURM_NNODES - 1))
     train_processes_per_node=$SLURM_NTASKS_PER_NODE
@@ -156,7 +161,7 @@ export ARGS="--dataset_type jsonl \
 --cache_dir $HF_DATASETS_CACHE \
 --num_proc $SLURM_CPUS_PER_TASK \
 --model_name_or_path Polygl0t/Tucano2-qwen-0.5B-Instruct \
---chat_template_path /assets/chat_template.jinja \
+--chat_template_path $workdir/llm-foundry/tokenizer/jinja_templates/chat_template.jinja \
 --checkpoint_dir $CHECKPOINT_DIR \
 --hub_token $HF_TOKEN \
 --max_prompt_length 2048 \
@@ -165,7 +170,9 @@ export ARGS="--dataset_type jsonl \
 --num_iterations 1 \
 --beta 0.0 \
 --loss_type dapo \
---scale_rewards true \
+--scale_rewards group \
+--verifier_enable_thinking \
+--verifier_strict \
 --save_steps 1000 \
 --logging_steps 1 \
 --learning_rate 0.000001 \
@@ -192,7 +199,7 @@ srun --nodes=1 --ntasks=1 --nodelist="$vllm_node" \
     --host "$VLLM_BIND_HOST" \
     --port "$VLLM_PORT" \
     --tensor_parallel_size "$vllm_tensor_parallel_size" \
-    --vllm_gpu_memory_utilization "$vllm_gpu_memory_utilization" \  
+    --gpu_memory_utilization "$VLLM_GPU_MEMORY_UTILIZATION" \
     1>>"$out" 2>>"$err" &
 vllm_pid=$!
 

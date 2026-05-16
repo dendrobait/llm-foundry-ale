@@ -270,7 +270,6 @@ def main(specs, slurm_job_id, hardware):
         logger.info(f"  Gradient checkpointing | {args.gradient_checkpointing}")
         logger.info(f"  Liger kernel | {args.use_liger_kernel}")
         logger.info(f"  Torch compile | {args.torch_compile}")
-        logger.info(f"  MFU type | {args.mfu_type}")
         logger.info(f"  Trainable parameters | {trainable_params:,}")
         if trainable_params != active_trainable_params:
             logger.info(f"  Active trainable parameters (counting only experts in MoE models) | {active_trainable_params:,}")
@@ -313,7 +312,6 @@ def main(specs, slurm_job_id, hardware):
             file_logger.log_metadata(f"  Gradient checkpointing | {args.gradient_checkpointing}")
             file_logger.log_metadata(f"  Liger kernel | {args.use_liger_kernel}")
             file_logger.log_metadata(f"  Torch compile | {args.torch_compile}")
-            file_logger.log_metadata(f"  MFU type | {args.mfu_type}")
             file_logger.log_metadata(f"  Trainable parameters | {trainable_params:,}")
             if trainable_params != active_trainable_params:
                 file_logger.log_metadata(f"  Active trainable parameters (counting only experts in MoE models) | {active_trainable_params:,}")

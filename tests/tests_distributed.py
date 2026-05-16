@@ -210,12 +210,11 @@ from mfu import (
     MFUContext,
     TrainingPerformanceMetrics,
     PEAK_FLOPS_BY_HARDWARE,
-    MFU_REGISTRY,
     create_mfu_context,
     calculate_training_metrics,
-    _mamba_layer_macs,
-    _attention_layer_macs,
-    _linear_attention_layer_macs,
+    _full_attention_macs_per_token,
+    _linear_attention_macs_per_token,
+    _mlp_macs_per_token,
 )
 
 
@@ -226,21 +225,9 @@ def test_peak_flops_registry():
     assert PEAK_FLOPS_BY_HARDWARE["a100"] == 300e12
 
 
-def test_mfu_registry_aliases():
-    """MFU strategy registry contains expected concrete strategies and aliases."""
-    assert "dense_transformer" in MFU_REGISTRY
-    assert "moe" in MFU_REGISTRY
-    assert MFU_REGISTRY["moe"] is MFU_REGISTRY["dense_transformer"]
-    assert "hybrid" in MFU_REGISTRY
-    assert "mamba" in MFU_REGISTRY
-    assert MFU_REGISTRY["hybrid"] is MFU_REGISTRY["mamba"]
-    assert "moe_hybrid" in MFU_REGISTRY
-    assert MFU_REGISTRY["moe_hybrid"] is MFU_REGISTRY["hybrid"]
-
-
 def test_calculate_training_metrics_moe_uses_active_params():
-    """MoE MFU should match the dense formula when given the same num_parameters
-    (which the trainer is expected to populate with the active param count)."""
+    """MoE MFU uses the dense formula on the active parameter count, which the
+    trainer is expected to pass via num_parameters."""
     common = dict(
         peak_flops=300e12,
         num_parameters=10_000_000,
@@ -249,8 +236,8 @@ def test_calculate_training_metrics_moe_uses_active_params():
         head_dim=64,
         sequence_length=512,
     )
-    moe_ctx = MFUContext(mfu_type="moe", **common)
-    dense_ctx = MFUContext(mfu_type="dense_transformer", **common)
+    moe_ctx = MFUContext(**common)
+    dense_ctx = MFUContext(**common)
     moe_metrics = calculate_training_metrics(moe_ctx, 4, 2, 1, dt=1.0)
     dense_metrics = calculate_training_metrics(dense_ctx, 4, 2, 1, dt=1.0)
     assert moe_metrics.mfu == dense_metrics.mfu
@@ -259,7 +246,6 @@ def test_calculate_training_metrics_moe_uses_active_params():
 def test_create_mfu_context():
     """create_mfu_context builds a correct MFUContext from mock args."""
     args = TrainingArguments()
-    args.mfu_type = "dense_transformer"
     args.num_hidden_layers = 12
     args.num_attention_heads = 12
     args.head_dim = 64
@@ -274,7 +260,6 @@ def test_create_mfu_context():
 def test_create_mfu_context_unsupported_hardware():
     """create_mfu_context raises on unknown hardware."""
     args = TrainingArguments()
-    args.mfu_type = "dense_transformer"
     args.num_hidden_layers = 12
     args.num_attention_heads = 12
     args.head_dim = 64
@@ -290,7 +275,6 @@ def test_create_mfu_context_unsupported_hardware():
 def test_calculate_training_metrics():
     """calculate_training_metrics returns sensible values."""
     ctx = MFUContext(
-        mfu_type="dense_transformer",
         peak_flops=300e12,
         num_parameters=125_000_000,
         num_hidden_layers=12,
@@ -313,9 +297,8 @@ def test_calculate_training_metrics():
 
 
 def test_calculate_training_metrics_rejects_invalid_inputs():
-    """Invalid timing and unknown MFU types must raise."""
+    """Invalid timing must raise."""
     ctx = MFUContext(
-        mfu_type="dense_transformer",
         peak_flops=300e12,
         num_parameters=125_000_000,
         num_hidden_layers=12,
@@ -330,173 +313,96 @@ def test_calculate_training_metrics_rejects_invalid_inputs():
         raised = True
     assert raised
 
-    bad_type_ctx = MFUContext(
-        mfu_type="moe_transformer",
-        peak_flops=300e12,
-        num_parameters=125_000_000,
-        num_hidden_layers=12,
-        num_attention_heads=12,
-        head_dim=64,
-        sequence_length=512,
-    )
-    raised = False
-    try:
-        calculate_training_metrics(bad_type_ctx, 4, 2, 1, dt=1.0)
-    except ValueError:
-        raised = True
-    assert raised
 
-
-def _make_mamba_context(**overrides):
-    """Helper: build an MFUContext with Mamba2-like parameters."""
+def _make_qwen3_5_hybrid_context(**overrides):
+    """Helper: build an MFUContext shaped like a Qwen3.5 hybrid model."""
     defaults = dict(
-        mfu_type="mamba",
         peak_flops=300e12,
         num_parameters=0,
-        num_hidden_layers=4,
-        num_attention_heads=12,
+        num_hidden_layers=32,
+        num_attention_heads=30,
         head_dim=128,
         sequence_length=1024,
-        hidden_size=1536,
+        hidden_size=3840,
         vocab_size=100352,
-        intermediate_size=512,
-        mamba_d_state=128,
-        mamba_chunk_size=256,
-        mamba_d_conv=4,
-        mamba_n_heads=48,
-        mamba_d_head=64,
-        mamba_n_groups=1,
+        intermediate_size=11008,
+        num_key_value_heads=6,
+        linear_num_key_heads=30,
+        linear_num_value_heads=30,
+        linear_key_head_dim=96,
+        linear_value_head_dim=192,
+        linear_conv_kernel_dim=4,
+        linear_chunk_size=256,
     )
     defaults.update(overrides)
     return MFUContext(**defaults)
 
 
-def test_mamba_layer_macs_formula():
-    """Verify _mamba_layer_macs matches a hand-computed reference (Mamba2-like)."""
-    ctx = _make_mamba_context()
-    d, e, g, n, h = 1536, 48 * 64, 1, 128, 48
-    expected = (
-        d * (2 * e + 2 * g * n + h)     # in_proj
-        + 4 * e                         # conv
-        + e * d                         # out_proj
-        + 2 * 256 * e                   # intra_chunk
-        + 2 * e * n                     # inter_chunk
-        + 3 * d * 512                   # mlp
+def test_full_attention_macs_formula():
+    """Verify _full_attention_macs_per_token for an MHA config."""
+    ctx = MFUContext(
+        peak_flops=300e12, num_parameters=0,
+        num_hidden_layers=4, num_attention_heads=12, head_dim=128,
+        sequence_length=1024, hidden_size=1536, vocab_size=100352,
+        intermediate_size=512,
     )
-    assert _mamba_layer_macs(ctx) == expected
-
-
-def test_attention_layer_macs_formula():
-    """Verify _attention_layer_macs (defaults to MHA when num_key_value_heads is 0)."""
-    ctx = _make_mamba_context()
     d, s, h, head_dim = 1536, 1024, 12, 128
     q_dim = h * head_dim
-    # MHA fallback: kv_dim == q_dim, so projections == 2*d*q + 2*d*q == 4*d*q.
     expected = 2 * d * q_dim + 2 * d * q_dim + d * s + 3 * d * 512
-    assert _attention_layer_macs(ctx) == expected
+    assert _full_attention_macs_per_token(ctx) == expected
 
 
-def test_attention_layer_macs_gqa():
+def test_full_attention_macs_gqa():
     """GQA: K/V projection cost scales with num_key_value_heads."""
-    # 12 query heads, 4 KV heads (Granite-MoE-Hybrid style).
-    ctx = _make_mamba_context(num_attention_heads=12, num_key_value_heads=4)
+    base = dict(
+        peak_flops=300e12, num_parameters=0,
+        num_hidden_layers=4, num_attention_heads=12, head_dim=128,
+        sequence_length=1024, hidden_size=1536, vocab_size=100352,
+        intermediate_size=512,
+    )
+    ctx = MFUContext(num_key_value_heads=4, **base)
     d, s, head_dim = 1536, 1024, 128
     q_dim = 12 * head_dim
     kv_dim = 4 * head_dim
     expected = 2 * d * q_dim + 2 * d * kv_dim + d * s + 3 * d * 512
-    assert _attention_layer_macs(ctx) == expected
-    # GQA must be strictly cheaper than MHA at equal query-head count.
-    mha_ctx = _make_mamba_context(num_attention_heads=12, num_key_value_heads=12)
-    assert _attention_layer_macs(ctx) < _attention_layer_macs(mha_ctx)
+    assert _full_attention_macs_per_token(ctx) == expected
+    mha_ctx = MFUContext(num_key_value_heads=12, **base)
+    assert _full_attention_macs_per_token(ctx) < _full_attention_macs_per_token(mha_ctx)
 
 
-def test_linear_attention_layer_macs_formula():
-    """Verify _linear_attention_layer_macs matches reference calculation."""
-    ctx = MFUContext(
-        mfu_type="mamba",
-        peak_flops=300e12,
-        num_parameters=0,
-        num_hidden_layers=32,
-        num_attention_heads=30,
-        head_dim=128,
-        sequence_length=1024,
-        hidden_size=3840,
-        vocab_size=100352,
-        intermediate_size=11008,
-        linear_num_key_heads=30,
-        linear_num_value_heads=30,
-        linear_key_head_dim=96,
-        linear_value_head_dim=192,
-        linear_conv_kernel_dim=4,
-        linear_chunk_size=256,
-    )
+def test_linear_attention_macs_formula():
+    """Verify _linear_attention_macs_per_token matches a hand-derived reference."""
+    ctx = _make_qwen3_5_hybrid_context()
     d = 3840
-    k = 30 * 96   # 2880
-    v = 30 * 192  # 5760
+    k = 30 * 96    # 2880
+    v = 30 * 192   # 5760
     h = 30
     L = 256
     expected = (
-        d * (2 * k + v + 2 * h)        # projections
-        + 4 * (2 * k + v)              # conv
-        + 2 * d * v                    # gate + out
-        + L * (3 * k + 2 * v)          # intra_chunk
-        + 3 * k * v // h               # inter_chunk
-        + 3 * d * 11008                # mlp
+        d * (2 * k + v + 2 * h)
+        + 4 * (2 * k + v)
+        + 2 * d * v
+        + L * (3 * k + 2 * v)
+        + 3 * k * v // h
+        + 3 * d * 11008
     )
-    assert _linear_attention_layer_macs(ctx) == expected
+    assert _linear_attention_macs_per_token(ctx) == expected
 
 
-def test_mamba_mfu_hybrid_layer_types():
-    """
-    Hybrid model: 3 mamba layers + 1 attention layer.
-    MFU should be greater than zero and differ from a pure-mamba calculation.
-    """
-    layer_types = ("mamba", "mamba", "mamba", "attention")
-    ctx_hybrid = _make_mamba_context(num_hidden_layers=4, layer_types=layer_types)
-    ctx_pure   = _make_mamba_context(num_hidden_layers=4, layer_types=())
-
-    m_hybrid = calculate_training_metrics(ctx_hybrid, 4, 1, 1, dt=1.0)
-    m_pure   = calculate_training_metrics(ctx_pure,   4, 1, 1, dt=1.0)
-
-    assert m_hybrid.mfu > 0
-    assert m_pure.mfu > 0
-    # They should differ because attention and mamba layers have different costs.
-    assert m_hybrid.mfu != m_pure.mfu
-
-
-def test_mamba_mfu_linear_attention_hybrid():
-    """MFU for a linear-attention + full-attention hybrid."""
+def test_hybrid_linear_attention_mfu():
+    """End-to-end MFU for a Qwen3.5-shaped hybrid (full + linear) model."""
     layer_types = tuple(
         "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
         for i in range(32)
     )
-    ctx = MFUContext(
-        mfu_type="hybrid",
-        peak_flops=300e12,
-        num_parameters=0,
-        num_hidden_layers=32,
-        num_attention_heads=30,
-        head_dim=128,
-        sequence_length=1024,
-        hidden_size=3840,
-        vocab_size=100352,
-        intermediate_size=11008,
-        layer_types=layer_types,
-        linear_num_key_heads=30,
-        linear_num_value_heads=30,
-        linear_key_head_dim=96,
-        linear_value_head_dim=192,
-        linear_conv_kernel_dim=4,
-        linear_chunk_size=256,
-    )
-    metrics = calculate_training_metrics(ctx, micro_batch_size=4, gradient_accumulation_steps=1, world_size=1, dt=1.0)
+    ctx = _make_qwen3_5_hybrid_context(layer_types=layer_types)
+    metrics = calculate_training_metrics(ctx, 4, 1, 1, dt=1.0)
     assert metrics.mfu > 0
 
 
-def test_create_mfu_context_mamba_fields():
-    """create_mfu_context extracts mamba/linear-attention fields from args."""
+def test_create_mfu_context_hybrid_fields():
+    """create_mfu_context extracts layer_types + linear-attention fields from args."""
     args = TrainingArguments()
-    args.mfu_type = "mamba"
     args.num_hidden_layers = 4
     args.num_attention_heads = 12
     args.head_dim = 128
@@ -504,117 +410,102 @@ def test_create_mfu_context_mamba_fields():
     args.hidden_size = 1536
     args.vocab_size = 100352
     args.intermediate_size = 512
-    args.mamba_d_state = 128
-    args.mamba_n_heads = 48
-    args.mamba_d_head = 64
-    args.layer_types = ["mamba", "mamba", "mamba", "attention"]
+    args.layer_types = [
+        "linear_attention", "linear_attention", "linear_attention", "full_attention",
+    ]
+    args.linear_num_key_heads = 16
+    args.linear_num_value_heads = 32
+    args.linear_key_head_dim = 128
+    args.linear_value_head_dim = 128
 
     ctx = create_mfu_context(args, "a100", num_parameters=0)
 
     assert ctx.hidden_size == 1536
     assert ctx.vocab_size == 100352
-    assert ctx.mamba_d_state == 128
-    assert ctx.mamba_n_heads == 48
-    assert ctx.layer_types == ("mamba", "mamba", "mamba", "attention")
-    # Fields not set on args should get defaults
-    assert ctx.linear_num_key_heads == 0
-
-
-def test_active_mlp_macs_dense_vs_moe():
-    """
-    The MLP MAC term should reflect *active* compute when MoE fields are set,
-    and fall back to the dense intermediate_size otherwise.
-    """
-    # Dense fallback: num_experts_per_tok = 0.
-    dense_ctx = _make_mamba_context()
-    d_dense = 1536
-    # _attention_layer_macs MLP term = 3 * d * intermediate_size
-    expected_dense_mlp = 3 * d_dense * 512
-    expected_dense_total = 4 * d_dense * d_dense + d_dense * 1024 + expected_dense_mlp
-    assert _attention_layer_macs(dense_ctx) == expected_dense_total
-
-    # GraniteMoeHybrid-style: routed-MoE + shared expert.
-    moe_ctx = _make_mamba_context(
-        num_experts_per_tok=6,
-        moe_intermediate_size=512,
-        shared_intermediate_size=1024,
+    assert ctx.layer_types == (
+        "linear_attention", "linear_attention", "linear_attention", "full_attention",
     )
-    expected_moe_mlp = 3 * d_dense * 512 * 6 + 3 * d_dense * 1024
-    expected_moe_total = 4 * d_dense * d_dense + d_dense * 1024 + expected_moe_mlp
-    assert _attention_layer_macs(moe_ctx) == expected_moe_total
-    # Sanity: MoE-active MLP > dense baseline here (top-6 of 64 experts + shared).
-    assert _attention_layer_macs(moe_ctx) > _attention_layer_macs(dense_ctx)
+    assert ctx.linear_num_key_heads == 16
+    assert ctx.linear_value_head_dim == 128
 
 
-def test_moe_hybrid_mfu_granite_like():
-    """End-to-end MFU calculation for a GraniteMoeHybrid-shaped config."""
+def test_mlp_macs_dense_vs_moe():
+    """MLP MAC term should reflect *active* compute when MoE fields are set,
+    and fall back to the dense intermediate_size otherwise."""
+    dense_ctx = _make_qwen3_5_hybrid_context()
+    d = 3840
+    assert _mlp_macs_per_token(dense_ctx) == 3 * d * 11008
+
+    moe_ctx = _make_qwen3_5_hybrid_context(
+        num_experts_per_tok=8,
+        moe_intermediate_size=768,
+        shared_intermediate_size=2048,
+    )
+    expected_moe = 3 * d * 768 * 8 + 3 * d * 2048
+    assert _mlp_macs_per_token(moe_ctx) == expected_moe
+    # MoE branch differs from the dense fallback.
+    assert _mlp_macs_per_token(moe_ctx) != _mlp_macs_per_token(dense_ctx)
+
+
+def test_hybrid_moe_mfu_qwen3_5_like():
+    """End-to-end MFU calculation for a Qwen3.5-MoE hybrid config."""
     layer_types = tuple(
-        "attention" if i in (5, 15, 25, 35) else "mamba"
-        for i in range(40)
+        "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+        for i in range(24)
     )
-    ctx = _make_mamba_context(
-        mfu_type="moe_hybrid",
-        num_hidden_layers=40,
+    ctx = _make_qwen3_5_hybrid_context(
+        num_hidden_layers=24,
         layer_types=layer_types,
-        num_experts_per_tok=6,
-        moe_intermediate_size=512,
-        shared_intermediate_size=1024,
+        num_experts_per_tok=8,
+        moe_intermediate_size=768,
+        shared_intermediate_size=0,
     )
-    metrics = calculate_training_metrics(
-        ctx, micro_batch_size=2, gradient_accumulation_steps=1, world_size=1, dt=1.0,
-    )
+    metrics = calculate_training_metrics(ctx, 2, 1, 1, dt=1.0)
     assert metrics.mfu > 0
 
-    # Same architecture without MoE flags must report a strictly smaller MFU,
-    # because the per-layer MLP term collapses to a single dense MLP.
-    ctx_no_moe = _make_mamba_context(
-        mfu_type="moe_hybrid",
-        num_hidden_layers=40,
+    ctx_no_moe = _make_qwen3_5_hybrid_context(
+        num_hidden_layers=24,
         layer_types=layer_types,
     )
-    metrics_no_moe = calculate_training_metrics(
-        ctx_no_moe, micro_batch_size=2, gradient_accumulation_steps=1, world_size=1, dt=1.0,
-    )
-    assert metrics.mfu > metrics_no_moe.mfu
+    metrics_no_moe = calculate_training_metrics(ctx_no_moe, 2, 1, 1, dt=1.0)
+    # MoE-active MLP cost differs from the dense MLP cost; the two MFUs must
+    # differ unless they happen to coincide, which they shouldn't here.
+    assert metrics.mfu != metrics_no_moe.mfu
 
 
 def test_create_mfu_context_moe_fields():
     """create_mfu_context extracts MoE fields from args."""
     args = TrainingArguments()
-    args.mfu_type = "moe_hybrid"
-    args.num_hidden_layers = 40
+    args.num_hidden_layers = 24
     args.num_attention_heads = 12
     args.head_dim = 128
     args.max_position_embeddings = 1024
-    args.num_experts_per_tok = 6
-    args.moe_intermediate_size = 512
-    args.shared_intermediate_size = 1024
+    args.num_experts_per_tok = 8
+    args.moe_intermediate_size = 768
+    args.shared_intermediate_size = 2048
 
     ctx = create_mfu_context(args, "a100", num_parameters=0)
 
-    assert ctx.num_experts_per_tok == 6
-    assert ctx.moe_intermediate_size == 512
-    assert ctx.shared_intermediate_size == 1024
+    assert ctx.num_experts_per_tok == 8
+    assert ctx.moe_intermediate_size == 768
+    assert ctx.shared_intermediate_size == 2048
 
 
 if __name__ == "__main__":
     for _fn in [
         test_peak_flops_registry,
-        test_mfu_registry_aliases,
         test_calculate_training_metrics_moe_uses_active_params,
         test_create_mfu_context,
         test_create_mfu_context_unsupported_hardware,
         test_calculate_training_metrics,
         test_calculate_training_metrics_rejects_invalid_inputs,
-        test_mamba_layer_macs_formula,
-        test_attention_layer_macs_formula,
-        test_attention_layer_macs_gqa,
-        test_linear_attention_layer_macs_formula,
-        test_mamba_mfu_hybrid_layer_types,
-        test_mamba_mfu_linear_attention_hybrid,
-        test_create_mfu_context_mamba_fields,
-        test_active_mlp_macs_dense_vs_moe,
-        test_moe_hybrid_mfu_granite_like,
+        test_full_attention_macs_formula,
+        test_full_attention_macs_gqa,
+        test_linear_attention_macs_formula,
+        test_hybrid_linear_attention_mfu,
+        test_create_mfu_context_hybrid_fields,
+        test_mlp_macs_dense_vs_moe,
+        test_hybrid_moe_mfu_qwen3_5_like,
         test_create_mfu_context_moe_fields,
     ]:
         run_test(_fn.__name__, _fn)
@@ -1936,7 +1827,6 @@ def test_end_to_end_mfu_with_model():
             mat_mul_precision="highest",
             tf32=False,
             bf16=False,
-            mfu_type="dense_transformer",
         )
         result = prepare_training_components(args=args, device="cpu", master_process=True)
         args = result.args
@@ -2024,7 +1914,6 @@ def test_ddp_trainer_cpu_two_steps():
             wandb_token=None,
             push_to_hub=False,
             begin_new_stage=True,
-            mfu_type="dense_transformer",
             lr_decay_type="cosine",
         )
 
@@ -2134,7 +2023,6 @@ def test_fsdp_trainer_cpu_two_steps():
             wandb_token=None,
             push_to_hub=False,
             begin_new_stage=True,
-            mfu_type="dense_transformer",
             lr_decay_type="cosine",
         )
 

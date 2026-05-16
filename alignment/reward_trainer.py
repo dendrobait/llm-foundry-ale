@@ -111,6 +111,9 @@ def main(args):
     os.environ["WANDB_PROJECT"] = args.wandb_project
 
     model_dtype = torch.bfloat16 if args.bf16 else torch.float32
+
+    # See https://huggingface.co/docs/trl/en/reward_trainer#trl.RewardConfig
+    # See https://huggingface.co/docs/transformers/main/en/main_classes/trainer#transformers.TrainingArguments
     training_args = trl.RewardConfig(
         output_dir=args.checkpoint_dir,
         max_length=args.max_length,
@@ -157,6 +160,7 @@ def main(args):
         run_name=f"{args.model_name_or_path.split('/')[-1]}-jobid-{jobid}-bs-{args.per_device_train_batch_size}-acumulation-{args.gradient_accumulation_steps}-ngpu-{torch.cuda.device_count()}-epochs-{args.num_train_epochs}",
     )
 
+    # See https://huggingface.co/docs/trl/en/reward_trainer#trl.RewardTrainer
     trainer = trl.RewardTrainer(
         model=args.model_name_or_path,
         processing_class=tokenizer,

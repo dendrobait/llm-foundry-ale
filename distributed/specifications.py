@@ -198,19 +198,6 @@ class TrainingArguments:
         default=1337,
         metadata={"help": "The seed for PyTorch to ensure reproducibility."},
     )
-    mfu_type: Optional[str] = field(
-        default="dense_transformer",
-        metadata={"help": (
-            "The MFU calculation strategy to use. "
-            "Options currently include: `dense_transformer`, `moe`, `mamba`, `hybrid` "
-            "(mamba + attention), and `moe_hybrid` (mamba + attention + routed-MoE MLPs, "
-            "optionally with shared experts, e.g., GraniteMoeHybrid). "
-            "For `moe`, the trainer uses the active parameter count (parameters actually "
-            "used per token) instead of the total parameter count when computing MFU. "
-            "For `moe_hybrid`, the per-layer MLP FLOPs are computed structurally from "
-            "`num_experts_per_tok`, `moe_intermediate_size`, and `shared_intermediate_size`."
-        )},
-    )
 
     # Optimizer settings
     optimizer_type: Optional[str] = field(

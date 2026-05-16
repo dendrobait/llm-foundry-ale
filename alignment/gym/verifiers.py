@@ -1962,9 +1962,10 @@ class MathAnswerChecker(TaskVerifier):
     In standard mode (relaxed=False), the check is an exact substring match:
     the expected answer string must appear verbatim in the response.
 
-    In relaxed mode (relaxed=True), also accepts the integer part of a float
-    answer.  For example, if the expected answer is "3.666..." the verifier
-    passes when the response contains "3.666..." OR "3".
+    In relaxed mode (relaxed=True), also accepts numeric equivalents such as
+    simple fractions, LaTeX fractions, repeating decimals, or the integer part
+    of a float answer.  For example, if the expected answer is "3.666..." the
+    verifier passes when the response contains "3.666...", "11/3", OR "3".
     """
 
     def build_description(self, *, expected_answer=None, relaxed=False):
@@ -2011,9 +2012,10 @@ class MathAnswerChecker(TaskVerifier):
             return grouped_number.sub(_ungroup, s)
 
         def _decimal_candidates(s):
-            """Extract numeric candidates, including PT decimals and mixed fractions."""
+            """Extract numeric candidates, including PT decimals and fractions."""
             s = re.sub(r"(?<=\d)\\,(?=\d)", "", s)
             s = re.sub(r"(?<=\d)[_\u00a0\u202f](?=\d)", "", s)
+            s = s.replace("\\!", "")
             candidates = []
 
             def _parse_number(raw):
@@ -2037,7 +2039,34 @@ class MathAnswerChecker(TaskVerifier):
                 except InvalidOperation:
                     return None
 
+            def _add_fraction(numerator_raw, denominator_raw):
+                numerator = _parse_number(numerator_raw)
+                denominator = _parse_number(denominator_raw)
+                if numerator is not None and denominator not in (None, 0):
+                    candidates.append(numerator / denominator)
+
+            def _add_repeating_decimal(prefix_raw, repeat_raw):
+                prefix = _parse_number(prefix_raw)
+                if prefix is None:
+                    return
+                repeat = Decimal(repeat_raw)
+                denominator = (Decimal(10) ** len(repeat_raw)) - 1
+                sign = Decimal(-1) if prefix < 0 else Decimal(1)
+                candidates.append(prefix + sign * repeat / denominator)
+
             number = r"[+-]?\d[\d.,_\u00a0\u202f ]*"
+            latex_fraction_re = re.compile(
+                r"\\(?:d?frac)\s*\{([^{}]+)\}\s*\{([^{}]+)\}"
+            )
+            for match in latex_fraction_re.finditer(s):
+                _add_fraction(match.group(1), match.group(2))
+
+            overline_re = re.compile(
+                rf"({number})[\.,]\s*\\overline\{{(\d+)\}}"
+            )
+            for match in overline_re.finditer(s):
+                _add_repeating_decimal(match.group(1), match.group(2))
+
             mixed_fraction_re = re.compile(
                 rf"(?<!\d)({number})\s+(\d+)\s*/\s*(\d+)(?!\d)"
             )
@@ -2053,6 +2082,15 @@ class MathAnswerChecker(TaskVerifier):
 
             def _inside_consumed(start, end):
                 return any(start >= cstart and end <= cend for cstart, cend in consumed)
+
+            simple_fraction_re = re.compile(
+                rf"(?<![\d/])({number})\s*/\s*({number})(?![\d/])"
+            )
+            for match in simple_fraction_re.finditer(s):
+                if _inside_consumed(*match.span()):
+                    continue
+                _add_fraction(match.group(1), match.group(2))
+                consumed.append(match.span())
 
             plain_number_re = re.compile(r"(?<!\d)[+-]?\d[\d.,_\u00a0\u202f ]*(?!\d)")
             for match in plain_number_re.finditer(s):
@@ -2073,7 +2111,7 @@ class MathAnswerChecker(TaskVerifier):
             places = max(0, min(_decimal_places(str(candidate)), _decimal_places(str(expected))))
             if places == 0:
                 return False
-            tolerance = Decimal(1).scaleb(-places) / 2
+            tolerance = Decimal(1).scaleb(-places)
             return abs(candidate - expected) <= tolerance
 
         norm_value = _strip_thousand_seps(value)

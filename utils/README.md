@@ -18,5 +18,6 @@ This folder contains miscellaneous utility scripts and helpers for working with 
 - `parse_run.py` — Parse and summarize training run logs for the distributed training scripts.
 - `resize_embedding_layer.py` — Check for size mismatches between a tokenizer and a model's embedding layer, and optionally resize the embeddings to match (e.g., after running tokensurgeon).
 - `upload_ckpts_to_hf.py` — A script to upload model checkpoints from a local directory to Hugging Face Hub, creating branches for each training step and optionally uploading extra files in the root directory.
+- `upload_quick.py` — A streamlined script to quickly upload files or folders to multiple branches of a Hugging Face repository.
 - `upload.py` — A helper script to upload directories to Hugging Face Hub.
 

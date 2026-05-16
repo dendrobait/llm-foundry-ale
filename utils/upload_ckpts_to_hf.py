@@ -67,7 +67,7 @@ def main(token, repo_id, root_dir):
                         repo_id=repo_id, 
                         revision="main"
                     )
-                    print(f"✓ Uploaded {step_folder_path} to {repo_id} at branch main")
+                    print(f"✅ Uploaded {step_folder_path} to {repo_id} at branch main")
                 else:
                     print(f"Creating branch {step} and uploading...")
                     # Create branch first
@@ -78,7 +78,7 @@ def main(token, repo_id, root_dir):
                         repo_id=repo_id, 
                         revision=step
                     )
-                    print(f"✓ Uploaded {step_folder_path} to {repo_id} at branch {step}")
+                    print(f"✅ Uploaded {step_folder_path} to {repo_id} at branch {step}")
                     
             except Exception as e:
                 print(f"❌ Error uploading {step}: {str(e)}")

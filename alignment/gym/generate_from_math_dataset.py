@@ -4,19 +4,19 @@ Math dataset generator for the gym.
 Loads verified math QA problems from assets/math-problems.jsonl and optionally
 generates additional synthetic problems using the built-in generator.
 
-Dataset-based problems use exact match validation.
-Synthetic problems use relaxed validation (exact match OR integer part of a float).
+Dataset-based and synthetic problems use relaxed validation (exact match,
+numeric equivalence, or integer part of a float).
 
 Usage:
-    # Use all 12481 problems from the dataset (no synthetic): 
+    # Use all 12474 problems from the dataset (no synthetic): 
     python generate_from_math_dataset.py \\
         --output_file math_tasks.jsonl \\
-        --num_samples 12481
+        --num_samples 12474
 
     # With synthetic problems:
     python generate_from_math_dataset.py \\
         --output_file math_tasks.jsonl \\
-        --num_samples 12481 \\
+        --num_samples 12474 \\
         --num_synthetic 10000 \\
         --seed 42
 
@@ -147,15 +147,15 @@ def load_math_problems(jsonl_path=None):
 
 
 # Sample construction
-def build_sample(question, answer, relaxed=False):
+def build_sample(question, answer, relaxed=True):
     """
     Build one gym sample from a math (question, answer) pair.
 
     Args:
         question: The problem text.
         answer: The expected answer string.
-        relaxed: If True, use relaxed validation (exact match OR integer part
-            of a float answer). Used for synthetic problems.
+        relaxed: If True, use relaxed validation (exact match, numeric
+            equivalence, or integer part of a float answer).
     """
     sample_id = hashlib.md5(question.encode()).hexdigest()
     kwargs = {"expected_answer": answer}
@@ -215,7 +215,7 @@ def main(args):
         selected = all_pairs[:num_samples]
 
         for question, answer in selected:
-            sample = build_sample(question, answer, relaxed=False)
+            sample = build_sample(question, answer, relaxed=True)
             sid = sample["id"]
             if sid in seen:
                 continue
