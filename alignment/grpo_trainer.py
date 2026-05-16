@@ -45,18 +45,16 @@ from utils import (
     split_dataset,
 )
 
-GYM_DIR = os.path.join(os.path.dirname(__file__), "gym")
-if GYM_DIR not in sys.path:
-    sys.path.insert(0, GYM_DIR)
-
-_ALIGNMENT_UTILS_MODULE = sys.modules.pop("utils", None)
-from verifier import Verifier
-if _ALIGNMENT_UTILS_MODULE is not None:
-    sys.modules["utils"] = _ALIGNMENT_UTILS_MODULE
-
+from gym.verifier import Verifier
 
 GRPO_LOSS_TYPES = ("grpo", "bnpo", "dr_grpo", "dapo", "sapo")
-SCALE_REWARD_VALUES = {"true": True, "false": False, "batch": "batch"}
+SCALE_REWARD_VALUES = {
+    "group": "group",
+    "true": "group",
+    "batch": "batch",
+    "none": "none",
+    "false": "none",
+}
 
 
 def _completion_to_text(completion):
@@ -70,7 +68,34 @@ def _completion_to_text(completion):
     return str(completion)
 
 
-def verifier_reward_func(completions, verifier_id_list, kwargs, log_extra=None, log_metric=None, **unused_kwargs):
+def _normalize_verifier_ids(verifier_ids):
+    """Normalize verifier_id_list to a list of strings."""
+    if verifier_ids is None:
+        return []
+    if isinstance(verifier_ids, str):
+        return [verifier_ids]
+    return list(verifier_ids)
+
+
+def _normalize_verifier_kwargs(verifier_kwargs):
+    """Normalize verifier_kwargs to a list of dictionaries."""
+    if verifier_kwargs is None:
+        return []
+    if isinstance(verifier_kwargs, (str, dict)):
+        return [verifier_kwargs]
+    return list(verifier_kwargs)
+
+
+def verifier_reward_func(
+    completions,
+    verifier_id_list,
+    kwargs,
+    verifier_enable_thinking=False,
+    verifier_strict=True,
+    log_extra=None,
+    log_metric=None,
+    **unused_kwargs,
+):
     """Reward completions with the fraction of verifier checks passed."""
     rewards = []
     passed_counts = []
@@ -78,12 +103,17 @@ def verifier_reward_func(completions, verifier_id_list, kwargs, log_extra=None, 
 
     for completion, verifier_ids, verifier_kwargs in zip(completions, verifier_id_list, kwargs):
         completion_text = _completion_to_text(completion)
+        verifier_ids = _normalize_verifier_ids(verifier_ids)
+        verifier_kwargs = _normalize_verifier_kwargs(verifier_kwargs)
 
         try:
+            # See alignment/gym/verifier.py for details on the Verifier class and how it processes the completion and kwargs.
             verifier = Verifier(
                 verifier_id_list=verifier_ids,
                 kwargs=verifier_kwargs,
                 completion=completion_text,
+                enable_thinking=verifier_enable_thinking,
+                strict=verifier_strict,
             )
             results = verifier.verify()
             passed = sum(bool(result) for result in results)
@@ -91,7 +121,7 @@ def verifier_reward_func(completions, verifier_id_list, kwargs, log_extra=None, 
             reward = passed / total if total else 0.0
         except Exception:
             passed = 0
-            total = len(verifier_ids) if verifier_ids is not None else 0
+            total = len(verifier_ids)
             reward = 0.0
 
         reward = max(0.0, min(1.0, float(reward)))
@@ -111,6 +141,7 @@ def verifier_reward_func(completions, verifier_id_list, kwargs, log_extra=None, 
 
 
 def validate_dataset_columns(dataset):
+    """Ensure the dataset contains the required columns for GRPO training."""
     required_columns = {"prompt", "verifier_id_list", "kwargs"}
     missing_columns = required_columns.difference(dataset.column_names)
     if missing_columns:
@@ -121,9 +152,10 @@ def validate_dataset_columns(dataset):
 
 
 def parse_scale_rewards(value):
+    """Parse the scale_rewards argument and validate its value."""
     value = value.lower()
     if value not in SCALE_REWARD_VALUES:
-        raise argparse.ArgumentTypeError("scale_rewards must be one of: true, false, batch")
+        raise argparse.ArgumentTypeError("scale_rewards must be one of: group, batch, none")
     return SCALE_REWARD_VALUES[value]
 
 
@@ -175,10 +207,11 @@ def main(args):
     if not args.use_vllm or args.vllm_mode != "server":
         model_init_kwargs["device_map"] = {"": state.process_index}
 
+    # See https://huggingface.co/docs/trl/en/grpo_trainer#trl.GRPOConfig
+    # See https://huggingface.co/docs/transformers/main/en/main_classes/trainer#transformers.TrainingArguments
     training_args = trl.GRPOConfig(
         model_init_kwargs=model_init_kwargs,
         output_dir=args.checkpoint_dir,
-        max_prompt_length=args.max_prompt_length,
         max_completion_length=args.max_completion_length,
         num_generations=args.num_generations,
         num_iterations=args.num_iterations,
@@ -236,9 +269,24 @@ def main(args):
         run_name=f"{args.model_name_or_path.split('/')[-1]}-jobid-{jobid}-bs-{args.per_device_train_batch_size}-accumulation-{args.gradient_accumulation_steps}-ngpu-{torch.cuda.device_count()}-epochs-{args.num_train_epochs}",
     )
 
+    def reward_func(completions, verifier_id_list, kwargs, log_extra=None, log_metric=None, **unused_kwargs):
+        return verifier_reward_func(
+            completions=completions,
+            verifier_id_list=verifier_id_list,
+            kwargs=kwargs,
+            verifier_enable_thinking=args.verifier_enable_thinking,
+            verifier_strict=args.verifier_strict,
+            log_extra=log_extra,
+            log_metric=log_metric,
+            **unused_kwargs,
+        )
+
+    reward_func.__name__ = "verifier_reward_func"
+
+    # See https://huggingface.co/docs/trl/en/grpo_trainer#trl.GRPOTrainer
     trainer = trl.GRPOTrainer(
         model=args.model_name_or_path,
-        reward_funcs=verifier_reward_func,
+        reward_funcs=reward_func,
         processing_class=tokenizer,
         args=training_args,
         train_dataset=dataset["train"] if "train" in dataset else dataset,
@@ -275,17 +323,19 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_dir", type=str, required=True)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a checkpoint to resume training from.")
     parser.add_argument("--ddp_find_unused_parameters", action="store_true", help="Set the `find_unused_parameters` flag in DDP.")
-    parser.add_argument("--max_prompt_length", type=int, default=2048, help="Maximum token length for prompts.")
-    parser.add_argument("--max_completion_length", type=int, default=1024, help="Maximum generated completion length.")
+    parser.add_argument("--max_prompt_length", type=int, default=2048, help="Maximum token length reserved when loading the tokenizer.")
+    parser.add_argument("--max_completion_length", type=int, default=256, help="Maximum generated completion length.")
     parser.add_argument("--num_generations", type=int, default=8, help="Number of completions sampled per prompt.")
     parser.add_argument("--num_iterations", type=int, default=1, help="Number of optimization iterations per generation batch.")
     parser.add_argument("--beta", type=float, default=0.0, help="KL coefficient. TRL GRPO commonly defaults this to 0.0.")
     parser.add_argument("--loss_type", choices=GRPO_LOSS_TYPES, default="dapo", help="GRPO loss variant.")
-    parser.add_argument("--scale_rewards", type=parse_scale_rewards, default=True, help="Reward scaling mode: true, false, or batch.")
+    parser.add_argument("--scale_rewards", type=parse_scale_rewards, default="group", help="Reward scaling mode: group, batch, or none.")
+    parser.add_argument("--verifier_enable_thinking", action="store_true", help="Require completions to include a valid <think>...</think> block before verifier checks.")
+    parser.add_argument("--verifier_strict", action=argparse.BooleanOptionalAction, default=True, help="Use strict verifier checks. Pass --no-verifier_strict to allow soft checker tolerances where implemented.")
     parser.add_argument("--mask_truncated_completions", action="store_true", help="Mask completions that hit max_completion_length without EOS.")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=1.0)
-    parser.add_argument("--top_k", type=int, default=50)
+    parser.add_argument("--top_k", type=int, default=0)
     parser.add_argument("--min_p", type=float, default=None)
     parser.add_argument("--repetition_penalty", type=float, default=1.0)
     parser.add_argument("--eval_steps", type=int, default=1000)
@@ -315,8 +365,8 @@ if __name__ == "__main__":
     parser.add_argument("--vllm_server_port", type=int, default=8000, help="vLLM server port when --vllm_mode server is used.")
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.3, help="GPU memory fraction for colocated vLLM.")
     parser.add_argument("--vllm_importance_sampling_correction", action=argparse.BooleanOptionalAction, default=True, help="Correct vLLM training-inference mismatch with importance sampling.")
-    parser.add_argument("--vllm_importance_sampling_cap", type=float, default=2.0)
-    parser.add_argument("--vllm_importance_sampling_mode", type=str, default="token_truncated")
+    parser.add_argument("--vllm_importance_sampling_cap", type=float, default=3.0)
+    parser.add_argument("--vllm_importance_sampling_mode", type=str, default="sequence_mask")
     parser.add_argument("--hub_token", type=str, default=None)
     parser.add_argument("--hub_model_id", type=str, default=None)
     parser.add_argument("--report_to", type=str, nargs="+", default=None, help="The list of integrations to report logs to.")

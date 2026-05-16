@@ -20,53 +20,102 @@ Usage:
 """
 
 import json
+import re
 
-from verifiers import (
-    BulletListChecker,
-    CapitalLettersPortugueseChecker,
-    CapitalWordFrequencyChecker,
-    CommaChecker,
-    CommonWordsChecker,
-    ConstrainedResponseChecker,
-    CountWordChecker,
-    EmailFieldValueChecker,
-    EmailJsonFormatChecker,
-    EmailSchemaKeysChecker,
-    EndChecker,
-    ForbiddenWords,
-    FrequencyComparisonChecker,
-    HighlightSectionChecker,
-    JsonFormat,
-    KeywordChecker,
-    KeywordFrequencyChecker,
-    LetterFrequencyChecker,
-    LowercaseLettersPortugueseChecker,
-    MathAnswerChecker,
-    NeedleMultiNumberDiffKeysChecker,
-    NeedleMultiNumberSameKeyChecker,
-    NeedleSingleNumberChecker,
-    NeedleUUIDChecker,
-    NumberOfSentences,
-    NumberOfWords,
-    ParagraphChecker,
-    ParagraphFirstWordCheck,
-    PlaceholderChecker,
-    PostscriptChecker,
-    QuotationChecker,
-    RareWordsChecker,
-    RepeatPromptThenAnswer,
-    ResponseLanguageChecker,
-    SectionChecker,
-    ThinkingFormatChecker,
-    TitleChecker,
-    ToolCallArgsKeysChecker,
-    ToolCallArgsTypesChecker,
-    ToolCallFormatChecker,
-    ToolCallNameChecker,
-    ToolCallRefusalChecker,
-    TwoResponsesChecker,
-    WordAtPositionChecker,
-)
+try:
+    from .verifiers import (
+        BulletListChecker,
+        CapitalLettersPortugueseChecker,
+        CapitalWordFrequencyChecker,
+        CommaChecker,
+        CommonWordsChecker,
+        ConstrainedResponseChecker,
+        CountWordChecker,
+        EmailFieldValueChecker,
+        EmailJsonFormatChecker,
+        EmailSchemaKeysChecker,
+        EndChecker,
+        ForbiddenWords,
+        FrequencyComparisonChecker,
+        HighlightSectionChecker,
+        JsonFormat,
+        KeywordChecker,
+        KeywordFrequencyChecker,
+        LetterFrequencyChecker,
+        LowercaseLettersPortugueseChecker,
+        MathAnswerChecker,
+        NeedleMultiNumberDiffKeysChecker,
+        NeedleMultiNumberSameKeyChecker,
+        NeedleSingleNumberChecker,
+        NeedleUUIDChecker,
+        NumberOfSentences,
+        NumberOfWords,
+        ParagraphChecker,
+        ParagraphFirstWordCheck,
+        PlaceholderChecker,
+        PostscriptChecker,
+        QuotationChecker,
+        RareWordsChecker,
+        RepeatPromptThenAnswer,
+        ResponseLanguageChecker,
+        SectionChecker,
+        ThinkingFormatChecker,
+        TitleChecker,
+        ToolCallArgsKeysChecker,
+        ToolCallArgsTypesChecker,
+        ToolCallFormatChecker,
+        ToolCallNameChecker,
+        ToolCallRefusalChecker,
+        TwoResponsesChecker,
+        WordAtPositionChecker,
+    )
+except ImportError:
+    from verifiers import (
+        BulletListChecker,
+        CapitalLettersPortugueseChecker,
+        CapitalWordFrequencyChecker,
+        CommaChecker,
+        CommonWordsChecker,
+        ConstrainedResponseChecker,
+        CountWordChecker,
+        EmailFieldValueChecker,
+        EmailJsonFormatChecker,
+        EmailSchemaKeysChecker,
+        EndChecker,
+        ForbiddenWords,
+        FrequencyComparisonChecker,
+        HighlightSectionChecker,
+        JsonFormat,
+        KeywordChecker,
+        KeywordFrequencyChecker,
+        LetterFrequencyChecker,
+        LowercaseLettersPortugueseChecker,
+        MathAnswerChecker,
+        NeedleMultiNumberDiffKeysChecker,
+        NeedleMultiNumberSameKeyChecker,
+        NeedleSingleNumberChecker,
+        NeedleUUIDChecker,
+        NumberOfSentences,
+        NumberOfWords,
+        ParagraphChecker,
+        ParagraphFirstWordCheck,
+        PlaceholderChecker,
+        PostscriptChecker,
+        QuotationChecker,
+        RareWordsChecker,
+        RepeatPromptThenAnswer,
+        ResponseLanguageChecker,
+        SectionChecker,
+        ThinkingFormatChecker,
+        TitleChecker,
+        ToolCallArgsKeysChecker,
+        ToolCallArgsTypesChecker,
+        ToolCallFormatChecker,
+        ToolCallNameChecker,
+        ToolCallRefusalChecker,
+        TwoResponsesChecker,
+        WordAtPositionChecker,
+    )
 
 # Registry: verifier_id → checker class
 # To add a new verifier, add a single entry here.
@@ -142,7 +191,7 @@ class Verifier:
             `check_following_soft` use that instead, allowing minor
             formatting tolerances (e.g. ±1 sentence, ±10% word count,
             single-newline paragraph separators).  Critical semantic errors
-            (wrong keywords, forbidden words, wrong language, …) are always
+            (wrong keywords, forbidden words, wrong language, etc.) are always
             caught regardless of this flag.
     """
 
@@ -153,23 +202,44 @@ class Verifier:
         self.completion = completion
         self.enable_thinking = enable_thinking
         self.strict = strict
+        # When thinking is enabled, non-thinking verifiers should only see
+        # the text that follows the closing </think> tag so that reasoning
+        # traces do not distort word/sentence/keyword counts.
+        self._eval_completion = (
+            self._strip_thinking(completion) if enable_thinking else completion
+        )
 
     def verify(self):
         """
         Run all verifiers and return a list of booleans.
 
         If *enable_thinking* is True, an extra `reasoning:thinking_format`
-        check is prepended to the results list.
+        check is prepended to the results list.  All other verifiers receive
+        only the text after the closing `</think>` tag so that reasoning
+        traces do not distort their checks.
         """
         results = []
         if self.enable_thinking:
+            # Pass the full completion so the thinking block itself is visible.
             results.append(
-                self._verify_one("reasoning:thinking_format", {})
+                self._verify_one("reasoning:thinking_format", {}, self.completion)
             )
         for i, verifier_id in enumerate(self.verifier_id_list):
-            passed = self._verify_one(verifier_id, self.kwargs[i])
+            passed = self._verify_one(verifier_id, self.kwargs[i], self._eval_completion)
             results.append(passed)
         return results
+
+    @staticmethod
+    def _strip_thinking(completion):
+        """Return the text that follows the last `</think>` tag.
+
+        If no closing tag is found the original string is returned unchanged,
+        so callers never need to guard against a missing think block.
+        """
+        end = completion.rfind("</think>")
+        if end == -1:
+            return completion
+        return completion[end + len("</think>"):].lstrip("\n")
 
     @staticmethod
     def _parse_kwargs(raw_kwargs):
@@ -178,7 +248,7 @@ class Verifier:
             raw_kwargs = json.loads(raw_kwargs)
         return raw_kwargs
 
-    def _verify_one(self, verifier_id, raw_kwargs):
+    def _verify_one(self, verifier_id, raw_kwargs, completion):
         """Instantiate the checker, build its description, and run verification."""
         raw_kwargs = self._parse_kwargs(raw_kwargs)
 
@@ -193,7 +263,7 @@ class Verifier:
         checker.build_description(**filtered)
 
         if self.strict:
-            return checker.check_following(self.completion)
+            return checker.check_following(completion)
         # Soft mode: prefer check_following_soft when the checker overrides it.
-        return checker.check_following_soft(self.completion)
+        return checker.check_following_soft(completion)
 

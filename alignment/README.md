@@ -37,6 +37,8 @@ python grpo_trainer.py \
     --max_prompt_length 2048 \
     --max_completion_length 1024 \
     --num_generations 8 \
+    --verifier_enable_thinking \
+    --no-verifier_strict \
     --per_device_train_batch_size 4 \
     --num_train_epochs 1
 

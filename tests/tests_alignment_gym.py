@@ -822,6 +822,30 @@ def test_17_math_verifier_pass_fail_edge_cases_and_relaxed_mode():
     )
     assert v15.verify() == [True], "Relaxed: mixed-number answer should pass"
 
+    # Relaxed mode — simple fraction equivalent to expected decimal accepted
+    v15b = Verifier(
+        verifier_id_list=["math:answer_check"],
+        kwargs=[{"expected_answer": "0.8095160501873879", "relaxed": True}],
+        completion=r"\frac{4968}{6137}",
+    )
+    assert v15b.verify() == [True], "Relaxed: equivalent fraction should pass"
+
+    # Relaxed mode — LaTeX fraction with thousands separators accepted
+    v15c = Verifier(
+        verifier_id_list=["math:answer_check"],
+        kwargs=[{"expected_answer": "336403.6666666666", "relaxed": True}],
+        completion=r"\frac{1,009,211}{3}",
+    )
+    assert v15c.verify() == [True], "Relaxed: LaTeX fraction should pass"
+
+    # Relaxed mode — LaTeX repeating decimal accepted
+    v15d = Verifier(
+        verifier_id_list=["math:answer_check"],
+        kwargs=[{"expected_answer": "336403.6666666666", "relaxed": True}],
+        completion=r"336,403.\overline{6}",
+    )
+    assert v15d.verify() == [True], "Relaxed: repeating decimal should pass"
+
     # Relaxed mode — wrong rounded answer still fails
     v16 = Verifier(
         verifier_id_list=["math:answer_check"],
@@ -850,12 +874,12 @@ def test_18_math_buildsample_validate_verify_jsonl_synthetic_generation():
     q0, a0 = math_pairs[0]
     assert q0.strip() and a0.strip(), "Each pair must have non-empty question and answer"
 
-    #  Dataset sample: exact match (no relaxed flag) 
+    #  Dataset sample: relaxed validation by default 
     sample = build_math_sample("Quanto é 2 + 2?", "4")
     assert isinstance(sample["id"], str) and len(sample["id"]) == 32
     assert sample["verifier_id_list"] == ["math:answer_check"]
-    assert _parse_kw(sample["kwargs"][0]) == {"expected_answer": "4"}, \
-        "Dataset sample kwargs must not include relaxed flag"
+    assert _parse_kw(sample["kwargs"][0]) == {"expected_answer": "4", "relaxed": True}, \
+        "Math sample kwargs should include relaxed=True by default"
     assert validate_math_sample(sample) == []
 
     v = Verifier(

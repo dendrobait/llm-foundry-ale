@@ -272,11 +272,18 @@ def _load_model(args, tokenizer, precision, master_process, logger=None, file_lo
 def _apply_liger_kernels(model, args):
     """
     Apply Liger kernels to the model for optimized performance.
+
+    Liger's RoPE replacement is only valid for HF rotary embedding modules
+    with the standard interface (Llama / Qwen3 / Qwen2.5 ...). Qwen3.5 uses
+    a customized rotary embedding (partial rotation, per-layer shapes) that
+    is not compatible with Liger's RoPE kernel, so we disable it there.
     """
     liger_transformers = importlib.import_module("liger_kernel.transformers")
     apply_liger_kernel = getattr(liger_transformers, "_apply_liger_kernel_to_instance")
+    model_type = str(getattr(model.config, "model_type", "") or "")
+    rope_compatible = not model_type.startswith("qwen3_5")
     liger_kwargs = {
-        "rope": True,
+        "rope": rope_compatible,
         "cross_entropy": False,
         "fused_linear_cross_entropy": True,
         "rms_norm": True,
@@ -446,16 +453,17 @@ def prepare_training_components(args, device, master_process, logger=None, file_
         model.config, 'num_key_value_heads', model.config.num_attention_heads,
     )
 
-    # Architecture fields used by the structural (mamba/hybrid/moe_hybrid) MFU path.
-    # These are no-ops for the dense_transformer path.
+    # Architecture fields consumed by the structural MFU path for hybrid models.
+    # No-ops for the standard dense / MoE-active dense_transformer path.
     args.hidden_size = getattr(model.config, 'hidden_size', 0)
     args.intermediate_size = getattr(model.config, 'intermediate_size', 0)
-    # `layer_types` is the canonical (HF) field listing each block's flavour
-    # (`mamba` / `attention` / `full_attention` / `linear_attention`). Some
-    # configs (e.g. Qwen3Next) instead encode the schedule as
-    # `full_attention_interval`: every k-th layer is full attention and the
-    # rest are linear attention. Synthesize `layer_types` in that case so the
-    # structural MFU path works without per-architecture special casing.
+    # `layer_types` lists each block's flavour. Supported values for the
+    # families this codebase targets: "full_attention" / "attention" and
+    # "linear_attention" (Qwen3.5 Gated-DeltaNet hybrid). Some configs encode
+    # the schedule via `full_attention_interval` (every k-th layer is full
+    # attention, the rest are linear-attention); synthesize `layer_types`
+    # from it when present so the MFU path works without architecture-specific
+    # branching.
     layer_types = tuple(getattr(model.config, 'layer_types', ()) or ())
     if not layer_types:
         full_attention_interval = getattr(model.config, 'full_attention_interval', None)
@@ -466,18 +474,17 @@ def prepare_training_components(args, device, master_process, logger=None, file_
                 for layer_idx in range(model.config.num_hidden_layers)
             )
     args.layer_types = layer_types
-    # Mamba2 hyperparameters (only present on mamba/hybrid configs).
-    args.mamba_d_state = getattr(model.config, 'mamba_d_state', 0)
-    args.mamba_chunk_size = getattr(model.config, 'mamba_chunk_size', 256)
-    args.mamba_d_conv = getattr(model.config, 'mamba_d_conv', 4)
-    args.mamba_n_heads = getattr(model.config, 'mamba_n_heads', 0)
-    args.mamba_d_head = getattr(model.config, 'mamba_d_head', 0)
-    args.mamba_n_groups = getattr(model.config, 'mamba_n_groups', 1)
 
-    # MoE fields. The *_intermediate_size selection mirrors the convention used
-    # in _compute_active_trainable_params: prefer `moe_intermediate_size` (Qwen)
-    # and fall back to `intermediate_size` (Granite-MoE-Hybrid, where it is
-    # already the per-expert size).
+    # Linear attention (GDN / DeltaNet) hyperparameters (e.g. Qwen3.5 hybrid).
+    args.linear_num_key_heads = getattr(model.config, 'linear_num_key_heads', 0) or 0
+    args.linear_num_value_heads = getattr(model.config, 'linear_num_value_heads', 0) or 0
+    args.linear_key_head_dim = getattr(model.config, 'linear_key_head_dim', 0) or 0
+    args.linear_value_head_dim = getattr(model.config, 'linear_value_head_dim', 0) or 0
+    args.linear_conv_kernel_dim = getattr(model.config, 'linear_conv_kernel_dim', 4) or 4
+
+    # MoE fields. Used by the hybrid structural FLOPs path for per-layer MLP
+    # cost; for the dense path, MoE accounting goes through `num_parameters`
+    # (active parameters, computed in `_compute_active_trainable_params`).
     _num_experts = (
         getattr(model.config, 'num_experts', None)
         or getattr(model.config, 'num_local_experts', None)
@@ -490,12 +497,12 @@ def prepare_training_components(args, device, master_process, logger=None, file_
             or getattr(model.config, 'intermediate_size', 0)
             or 0
         )
-        # Shared-expert intermediate size has at least two naming conventions:
-        # `shared_intermediate_size` (Granite-MoE-Hybrid) and
-        # `shared_expert_intermediate_size` (Qwen-MoE / Qwen3Next).
+        # Qwen-MoE / Qwen3.5-MoE name the shared-expert size
+        # `shared_expert_intermediate_size`; accept `shared_intermediate_size`
+        # as an alias for backwards compatibility.
         args.shared_intermediate_size = (
-            getattr(model.config, 'shared_intermediate_size', None)
-            or getattr(model.config, 'shared_expert_intermediate_size', None)
+            getattr(model.config, 'shared_expert_intermediate_size', None)
+            or getattr(model.config, 'shared_intermediate_size', None)
             or 0
         )
     else:
@@ -505,26 +512,30 @@ def prepare_training_components(args, device, master_process, logger=None, file_
 
     tokenizer.model_max_length = model.config.max_position_embeddings
 
-    # Warn if training a hybrid/mamba model without the optimized CUDA kernels.
-    if args.mfu_type in ("mamba", "hybrid", "moe_hybrid"):
-        _mamba_kernels_available = True
+    # Warn if training a hybrid (used linear-attention) model without the
+    # fast-path kernels. E.g., the Qwen3.5 modeling code only takes the optimized
+    # path when BOTH `flash-linear-attention` (chunk / fused gated-delta-rule)
+    # AND `causal-conv1d` (the short-conv branch of GatedDeltaNet) are
+    # importable; missing either falls back to a slow PyTorch reference path.
+    if "linear_attention" in args.layer_types:
+        missing = []
         try:
-            from mamba_ssm import Mamba
+            import fla  # noqa: F401
         except (ImportError, ModuleNotFoundError):
-            _mamba_kernels_available = False
+            missing.append("flash-linear-attention")
         try:
-            from causal_conv1d import causal_conv1d_fn
+            import causal_conv1d  # noqa: F401
         except (ImportError, ModuleNotFoundError):
-            _mamba_kernels_available = False
-
-        if not _mamba_kernels_available:
+            missing.append("causal-conv1d")
+        if missing:
             _log_message(
                 master_process, logger, file_logger,
-                "WARNING: mfu_type is set to '{}' but the mamba-ssm and/or causal-conv1d "
-                "packages are not installed. Training will be significantly slower without "
-                "the optimized CUDA kernels. Install them with:\n"
-                "    pip install mamba-ssm[causal-conv1d] --no-build-isolation\n"
-                "See https://github.com/state-spaces/mamba/#installation for details.".format(args.mfu_type),
+                "WARNING: the model has linear-attention layers but the following fast-path "
+                f"package(s) are not installed: {', '.join(missing)}. Training will fall back "
+                "to a slow PyTorch reference path. Install with:\n"
+                "    pip install flash-linear-attention causal-conv1d\n"
+                "See https://github.com/fla-org/flash-linear-attention#installation and "
+                "https://github.com/Dao-AILab/causal-conv1d for details.",
             )
 
     if args.use_liger_kernel:
@@ -603,11 +614,11 @@ def _iter_transformer_blocks(model):
     """
     Yield every transformer block that should be individually sharded by FSDP.
 
-    Modern HF causal-LM models (dense, MoE, mamba, hybrid) all expose their
+    Modern HF causal-LM models (dense, MoE, Qwen3.5 hybrid) all expose their
     per-layer blocks under `model.model.layers` as a `ModuleList`. Sharding
     every entry in that list is the standard FSDP2 idiom (cf. the official
     PyTorch FSDP2 tutorial and torchtitan), and is architecture-agnostic: it
-    works for dense, MoE, mamba, and hybrid models without registering any
+    works for dense, MoE, and hybrid models without registering any
     decoder-layer class up front.
 
     This helper centralizes the assumption and provides a clearer error if a
@@ -720,9 +731,9 @@ def apply_fsdp_wrapping(model, args, device_type, world_size, rank, master_proce
 
     # Per-layer sharding (bottom-up, as required by FSDP2). We wrap every
     # block in `model.model.layers` regardless of its concrete class. This is
-    # architecture-agnostic and supports dense, MoE, mamba, and hybrid models
-    # (e.g. OlmoHybrid, GraniteMoeHybrid, Qwen3Next) without needing to
-    # register their decoder-layer class first.
+    # architecture-agnostic and supports dense (Llama, Qwen3, Qwen3.5), MoE
+    # (Qwen3.5-MoE), and Qwen3.5 linear-attention hybrid models without
+    # needing to register their decoder-layer class first.
     layer_classes = set()
     for layer in _iter_transformer_blocks(model):
         fully_shard(layer, **fsdp_kwargs)

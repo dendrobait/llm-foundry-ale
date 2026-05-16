@@ -4,7 +4,7 @@ Production-ready distributed training scripts for large language models using Py
 
 ## Overview
 
-This folder contains distributed training scripts for large language models using PyTorch's DDP (Distributed Data Parallel) and FSDP (Fully Sharded Data Parallel) strategies. Both are optimized for multi-GPU, multi-node SLURM clusters and support standard AdamW or hybrid Muon + Adam optimizers. The scripts also support working with several types of different architectures (dense transformers, mixture of experts, hybrid models) and can be easily extended to new ones.
+This folder contains distributed training scripts for large language models using PyTorch's DDP (Distributed Data Parallel) and FSDP (Fully Sharded Data Parallel) strategies. Both are optimized for multi-GPU, multi-node SLURM clusters and support standard AdamW or hybrid Muon + Adam optimizers. The supported model families are vanilla GPT-style **dense transformers** (e.g. `LlamaForCausalLM`, `Qwen3ForCausalLM`) and the **Qwen3.5** family — dense, MoE, and hybrid linear/full-attention variants (`Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`).
 
 ## Available Training Scripts
 
@@ -39,9 +39,9 @@ This folder contains distributed training scripts for large language models usin
 
 ## Example Architecture Configs
 
-Here we have toy examples of model config files covering a range of architectures (and HF definitions) the codebase supports. Each config is a `transformers`-compatible JSON that can be passed directly to `path_to_model_config` in `specifications.yaml`.
+Here we have toy examples of model config files covering the supported architectures. Each config is a `transformers`-compatible JSON that can be passed directly to `path_to_model_config` in `specifications.yaml`.
 
-- **NOTE**: For hybrid-mamba models (e.g., GraniteMoeHybridForCausalLM), if you want maximum performance, you will need to install the `mamba-ssm` package with the `causal-conv1d` extra to get the optimized CUDA kernels for the Mamba layers (i.e., `pip install mamba-ssm[causal-conv1d] --no-build-isolation`). For models that use linear forms of attention like delta rule or gated delta rule (e.g., OlmoHybridForCausalLM, Qwen3NextForCausalLM), installing the `flash-linear-attention` package will provide optimized kernels for the linear attention parts (i.e., `pip install flash-linear-attention`). If these packages are not installed, the training will still run, but will be significantly slower.
+- **NOTE**: For Qwen3.5 hybrids that mix linear-attention layers with full attention (`layer_types` containing `"linear_attention"`), the fast path in the modeling code requires **both** `flash-linear-attention` (gated-delta-rule chunk / fused kernels) **and** `causal-conv1d` (short-conv branch of `GatedDeltaNet`). Install both with `pip install flash-linear-attention causal-conv1d`. If either is missing, training still runs but falls back to a slow PyTorch reference path.
 
 <details>
 <summary><strong>Dense Transformer</strong> — <code>LlamaForCausalLM</code> · Dense transformer · <a href="https://huggingface.co/docs/transformers/model_doc/llama">HF Docs</a></summary>
@@ -125,28 +125,77 @@ Here we have toy examples of model config files covering a range of architecture
 </details>
 
 <details>
-<summary><strong>Linear-Attention Hybrid</strong> — <code>OlmoHybridForCausalLM</code> · Linear-attention hybrid · <a href="https://huggingface.co/docs/transformers/v5.8.0/en/model_doc/olmo_hybrid">HF Docs</a></summary>
+<summary><strong>Qwen3.5 Dense (Full Attention)</strong> — <code>Qwen3_5ForCausalLM</code> · Dense transformer with full attention · <a href="https://huggingface.co/docs/transformers/main/en/model_doc/qwen3_5">HF Docs</a></summary>
 
 ```json
 {
-  "model_type": "olmo_hybrid",
   "architectures": [
-    "OlmoHybridForCausalLM"
+    "Qwen3_5ForCausalLM"
   ],
+  "model_type": "qwen3_5_text",
   "vocab_size": 49152,
   "hidden_size": 512,
   "intermediate_size": 1536,
   "num_hidden_layers": 8,
   "num_attention_heads": 8,
-  "num_key_value_heads": 8,
+  "num_key_value_heads": 4,
+  "head_dim": 64,
   "hidden_act": "silu",
   "max_position_embeddings": 4096,
   "initializer_range": 0.02,
+  "rms_norm_eps": 1e-06,
   "use_cache": true,
+  "tie_word_embeddings": false,
   "attention_bias": false,
   "attention_dropout": 0.0,
-  "rms_norm_eps": 1e-05,
-  "tie_word_embeddings": true,
+  "partial_rotary_factor": 0.25,
+  "layer_types": [
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention"
+  ],
+  "rope_parameters": null,
+  "bos_token_id": 0,
+  "eos_token_id": 0,
+  "pad_token_id": 0,
+  "torch_dtype": "bfloat16"
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Qwen3.5 Hybrid (Linear + Full Attention)</strong> — <code>Qwen3_5ForCausalLM</code> · Dense hybrid · <a href="https://huggingface.co/docs/transformers/main/en/model_doc/qwen3_5">HF Docs</a></summary>
+
+Every 4th layer is full attention, the rest use Gated-DeltaNet linear attention.
+
+```json
+{
+  "architectures": [
+    "Qwen3_5ForCausalLM"
+  ],
+  "model_type": "qwen3_5_text",
+  "vocab_size": 49152,
+  "hidden_size": 512,
+  "intermediate_size": 1536,
+  "num_hidden_layers": 8,
+  "num_attention_heads": 8,
+  "num_key_value_heads": 4,
+  "head_dim": 64,
+  "hidden_act": "silu",
+  "max_position_embeddings": 4096,
+  "initializer_range": 0.02,
+  "rms_norm_eps": 1e-06,
+  "use_cache": true,
+  "tie_word_embeddings": false,
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "partial_rotary_factor": 0.25,
   "layer_types": [
     "linear_attention",
     "linear_attention",
@@ -158,128 +207,126 @@ Here we have toy examples of model config files covering a range of architecture
     "full_attention"
   ],
   "linear_num_key_heads": 8,
-  "linear_num_value_heads": 8,
-  "linear_key_head_dim": 96,
-  "linear_value_head_dim": 192,
+  "linear_num_value_heads": 16,
+  "linear_key_head_dim": 64,
+  "linear_value_head_dim": 64,
   "linear_conv_kernel_dim": 4,
-  "linear_allow_neg_eigval": true,
+  "rope_parameters": null,
   "bos_token_id": 0,
   "eos_token_id": 0,
   "pad_token_id": 0,
-  "rope_parameters": null
+  "torch_dtype": "bfloat16"
 }
 ```
 
 </details>
 
 <details>
-<summary><strong>Mamba + Attention MoE Hybrid</strong> — <code>GraniteMoeHybridForCausalLM</code> · Mamba + Attention MoE hybrid · <a href="https://huggingface.co/docs/transformers/en/model_doc/granitemoehybrid">HF Docs</a></summary>
+<summary><strong>Qwen3.5 MoE (Full Attention)</strong> — <code>Qwen3_5MoeForCausalLM</code> · MoE transformer with full attention · <a href="https://huggingface.co/docs/transformers/main/en/model_doc/qwen3_5_moe">HF Docs</a></summary>
 
 ```json
 {
   "architectures": [
-    "GraniteMoeHybridForCausalLM"
+    "Qwen3_5MoeForCausalLM"
   ],
+  "model_type": "qwen3_5_moe_text",
+  "vocab_size": 49152,
+  "hidden_size": 512,
+  "intermediate_size": 1536,
+  "num_hidden_layers": 8,
+  "num_attention_heads": 8,
+  "num_key_value_heads": 4,
+  "head_dim": 64,
+  "hidden_act": "silu",
+  "max_position_embeddings": 4096,
+  "initializer_range": 0.02,
+  "rms_norm_eps": 1e-06,
+  "use_cache": true,
+  "tie_word_embeddings": false,
   "attention_bias": false,
   "attention_dropout": 0.0,
-  "attention_multiplier": 0.015625,
+  "partial_rotary_factor": 0.25,
+  "layer_types": [
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention"
+  ],
+  "num_experts": 8,
+  "num_experts_per_tok": 2,
+  "moe_intermediate_size": 384,
+  "shared_expert_intermediate_size": 384,
+  "norm_topk_prob": true,
+  "output_router_logits": false,
+  "router_aux_loss_coef": 0.001,
+  "rope_parameters": null,
   "bos_token_id": 0,
   "eos_token_id": 0,
-  "embedding_multiplier": 12,
-  "hidden_act": "silu",
-  "hidden_size": 512,
-  "initializer_range": 0.1,
-  "intermediate_size": 1024,
-  "layer_types": [
-    "mamba",
-    "mamba",
-    "mamba",
-    "attention",
-    "mamba",
-    "mamba",
-    "mamba",
-    "attention"
-  ],
-  "logits_scaling": 2,
-  "mamba_chunk_size": 256,
-  "mamba_conv_bias": true,
-  "mamba_d_conv": 4,
-  "mamba_d_head": 128,
-  "mamba_d_state": 128,
-  "mamba_expand": 2,
-  "mamba_n_groups": 1,
-  "mamba_n_heads": 8,
-  "mamba_proj_bias": false,
-  "max_position_embeddings": 4096,
-  "model_type": "granitemoehybrid",
-  "normalization_function": "rmsnorm",
-  "num_attention_heads": 8,
-  "num_experts_per_tok": 2,
-  "num_hidden_layers": 8,
-  "num_key_value_heads": 8,
-  "num_local_experts": 8,
-  "output_router_logits": false,
-  "position_embedding_type": "nope",
-  "residual_multiplier": 0.22,
-  "rms_norm_eps": 1e-05,
-  "rope_scaling": null,
-  "rope_theta": 10000,
-  "router_aux_loss_coef": 0.0,
-  "shared_intermediate_size": 512,
-  "tie_word_embeddings": true,
-  "torch_dtype": "bfloat16",
-  "use_cache": true,
-  "vocab_size": 49152
+  "pad_token_id": 0,
+  "torch_dtype": "bfloat16"
 }
 ```
 
 </details>
 
 <details>
-<summary><strong>Linear-Attention MoE Hybrid</strong> — <code>Qwen3NextForCausalLM</code> · Linear-attention MoE hybrid · <a href="https://huggingface.co/docs/transformers/v5.8.0/en/model_doc/qwen3_next">HF Docs</a></summary>
+<summary><strong>Qwen3.5 MoE Hybrid (Linear + Full Attention)</strong> — <code>Qwen3_5MoeForCausalLM</code> · MoE hybrid · <a href="https://huggingface.co/docs/transformers/main/en/model_doc/qwen3_5_moe">HF Docs</a></summary>
+
+Every 4th layer is full attention, the rest use Gated-DeltaNet linear attention; MLPs are routed mixture-of-experts with an optional shared expert.
 
 ```json
 {
   "architectures": [
-    "Qwen3NextForCausalLM"
+    "Qwen3_5MoeForCausalLM"
   ],
-  "attention_dropout": 0.0,
-  "bos_token_id": 0,
-  "eos_token_id": 0,
-  "decoder_sparse_step": 1,
-  "full_attention_interval": 4,
-  "head_dim": 128,
-  "hidden_act": "silu",
+  "model_type": "qwen3_5_moe_text",
+  "vocab_size": 49152,
   "hidden_size": 512,
-  "initializer_range": 0.02,
   "intermediate_size": 1536,
-  "linear_conv_kernel_dim": 4,
-  "linear_key_head_dim": 128,
-  "linear_num_key_heads": 8,
-  "linear_num_value_heads": 8,
-  "linear_value_head_dim": 128,
-  "max_position_embeddings": 4096,
-  "mlp_only_layers": [],
-  "model_type": "qwen3_next",
-  "moe_intermediate_size": 256,
-  "norm_topk_prob": true,
+  "num_hidden_layers": 8,
   "num_attention_heads": 8,
+  "num_key_value_heads": 4,
+  "head_dim": 64,
+  "hidden_act": "silu",
+  "max_position_embeddings": 4096,
+  "initializer_range": 0.02,
+  "rms_norm_eps": 1e-06,
+  "use_cache": true,
+  "tie_word_embeddings": false,
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "partial_rotary_factor": 0.25,
+  "layer_types": [
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention"
+  ],
+  "linear_num_key_heads": 8,
+  "linear_num_value_heads": 16,
+  "linear_key_head_dim": 64,
+  "linear_value_head_dim": 64,
+  "linear_conv_kernel_dim": 4,
   "num_experts": 8,
   "num_experts_per_tok": 2,
-  "num_hidden_layers": 8,
-  "num_key_value_heads": 8,
+  "moe_intermediate_size": 384,
+  "shared_expert_intermediate_size": 384,
+  "norm_topk_prob": true,
   "output_router_logits": false,
-  "partial_rotary_factor": 0.25,
-  "rms_norm_eps": 1e-06,
-  "rope_scaling": null,
-  "rope_theta": 10000000,
   "router_aux_loss_coef": 0.001,
-  "shared_expert_intermediate_size": 256,
-  "tie_word_embeddings": true,
-  "torch_dtype": "bfloat16",
-  "use_cache": true,
-  "use_sliding_window": false,
-  "vocab_size": 49152
+  "rope_parameters": null,
+  "bos_token_id": 0,
+  "eos_token_id": 0,
+  "pad_token_id": 0,
+  "torch_dtype": "bfloat16"
 }
 ```
 

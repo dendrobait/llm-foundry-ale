@@ -55,15 +55,10 @@ source $workdir/.venv_distributed/bin/activate
 # These packages provide optimized CUDA kernels for specific attention mechanisms.
 # Uncomment only if your model uses the corresponding attention type.
 
-# Optional: For hybrid-mamba models (e.g., GraniteMoeHybridForCausalLM)
-# Install mamba-ssm with causal-conv1d for optimized Mamba layer kernels.
-# Uncomment the following line if using Mamba-based models:
-# pip3 install mamba-ssm[causal-conv1d] --no-build-isolation --no-cache-dir
-
-# Active: For linear attention mechanisms (delta rule, gated delta rule)
-# Models: OlmoHybridForCausalLM, Qwen3NextForCausalLM, and similar architectures
-# This significantly speeds up training for linear attention layers.
+# Flash Linear Attention (for fast linear attention implementations)
+# Causal Conv1D (for models using causal convolutional layers instead of standard attention)
 # pip3 install flash-linear-attention --no-cache-dir
+# pip3 install causal-conv1d --no-build-isolation --no-cache-dir
 
 #############################################
 # Environment Setup
