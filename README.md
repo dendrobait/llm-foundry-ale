@@ -53,7 +53,7 @@ The script also contains commented step-by-step instructions for creating the pe
 
 ### Module Stack Selection
 
-Marvin has a dual software stack (AMD and Intel). The single `.modules.sh` file at the repository root loads the right one for you. It auto-detects the stack from the SLURM environment, so most of the time you just source it and forget about it:
+Marvin has a dual software stack (AMD and Intel). The single [`.modules.sh`](.modules.sh) file at the repository root loads the right one for you. It auto-detects the stack from the SLURM environment, so most of the time you just source it and forget about it:
 
 ```bash
 # Inside a SLURM job: auto-detected from #SBATCH directives
@@ -86,8 +86,6 @@ For example:
 
 ```bash
 pip install -e "./llm-foundry/.[distributed]"  # for DDP/FSDP training
-pip install -e "./llm-foundry/.[trl]"          # for SFT/DPO
-pip install -e "./llm-foundry/.[tests]"        # for running the test suite
 ```
 
 ## Running the Tests

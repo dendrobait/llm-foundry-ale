@@ -231,7 +231,6 @@ if __name__ == "__main__":
     # Loss configuration
     # The `assistant_only_loss` requires that the chat template supports returning the assistant tokens mask via the {% generation %} keyword.
     parser.add_argument("--assistant_only_loss", action="store_true", help="If set, the loss will only be computed on the assistant's responses, ignoring the user inputs.")
-    parser.add_argument("--system_message", type=str, default=None, help="System message to prepend to the user messages. If not set, no system message will be used, and we will default to the chat template's default behavior.")
     # Training and optimizer
     parser.add_argument("--eval_steps", type=int, default=1000)
     parser.add_argument("--save_steps", type=int, default=1000)

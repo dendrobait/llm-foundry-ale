@@ -4,7 +4,7 @@ Helper script to initialize a model from a config file and print its size and ot
 How to Use:
     python inspect_model.py --config_path <path_to_config> [--base_model <model_id>] [--precision {bfloat16,float32}]
 
-Example:
+Usage:
     python inspect_model.py --config_path ./config.json
     python inspect_model.py --config_path ./config.json --base_model meta-llama/Llama-2-7b --precision bfloat16
 """

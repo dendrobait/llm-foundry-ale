@@ -8,7 +8,7 @@ e.g., after running tokensurgeon.
 How to Use:
     python resize_embedding_layer.py <model_path> [options]
 
-Examples:
+Usage:
     # Check for mismatch only
     python resize_embedding_layer.py /path/to/model
 

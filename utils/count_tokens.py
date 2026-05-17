@@ -5,7 +5,7 @@ This script scans directories containing tokenized datasets, aggregates statisti
 .metadata files, and generates comprehensive hierarchical reports with token counts,
 sample counts, and other metrics across the entire dataset structure.
 
-Example usage:
+Usage:
     python count_tokens.py \\
         --main-dir data/tokenized \\
         --output-file dataset_report.txt
@@ -21,6 +21,17 @@ def main(main_dir, output_file):
         "Samples", "Tokens", "Tokens per chunk", "Block size", "Chunks", "Tokenizer"
     ]
 
+    key_aliases = {
+        "samples": "Samples",
+        "tokens": "Tokens",
+        "tokens per chunk": "Tokens per chunk",
+        "tokens_per_chunk": "Tokens per chunk",
+        "block size": "Block size",
+        "block_size": "Block size",
+        "chunks": "Chunks",
+        "tokenizer": "Tokenizer",
+    }
+
     folder_metadata = {}
 
     for root, dirs, files in os.walk(main_dir):
@@ -28,36 +39,42 @@ def main(main_dir, output_file):
             if file.endswith('.metadata'):
                 file_path = os.path.join(root, file)
                 rel_path = os.path.relpath(root, main_dir)
-                parts = rel_path.split(os.sep)
-                if len(parts) == 1:
+                parts = [p for p in rel_path.split(os.sep) if p and p != '.']
+                if not parts:
+                    subfolder = os.path.basename(os.path.abspath(main_dir))
+                    subsubfolder = None
+                elif len(parts) == 1:
                     subfolder = parts[0]
                     subsubfolder = None
                 else:
                     subfolder = parts[0]
                     subsubfolder = parts[1]
-                
+
                 metadata = {}
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    lines = f.read().splitlines()
-                    for line in lines:
-                        for field in metadata_fields:
-                            if line.startswith(f"{field}:"):
-                                value = line.split(":", 1)[1].strip()
+                    for line in f:
+                        if ':' not in line:
+                            continue
+                        raw_key, raw_value = line.split(':', 1)
+                        key = raw_key.strip().lower()
+                        field = key_aliases.get(key)
+                        if field is None:
+                            continue
+                        value = raw_value.strip()
+                        try:
+                            metadata[field] = int(value)
+                        except ValueError:
+                            metadata[field] = value
 
-                                try:
-                                    metadata[field] = int(value)
-                                except ValueError:
-                                    metadata[field] = value
-                
                 if subfolder not in folder_metadata:
                     folder_metadata[subfolder] = {}
                 key = subsubfolder if subsubfolder else subfolder
-                
+
                 if key not in folder_metadata[subfolder]:
                     folder_metadata[subfolder][key] = {}
                     for field in metadata_fields:
                         folder_metadata[subfolder][key][field] = 0
-                
+
                 for field, value in metadata.items():
                     if isinstance(value, int):
                         folder_metadata[subfolder][key][field] += value
@@ -167,7 +184,4 @@ if __name__ == "__main__":
     parser.add_argument("--output-file", type=str, default="report.txt", help="Output report file name.")
     args = parser.parse_args()
     
-    print("🚀")
     main(args.main_dir, output_file=args.output_file)
-    print("🎉")
-
