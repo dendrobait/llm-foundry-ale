@@ -1,41 +1,82 @@
 # Distributed Training
 
-Production-ready distributed training scripts for large language models using PyTorch's DDP (Distributed Data Parallel) and FSDP (Fully Sharded Data Parallel) strategies.
+This folder contains distributed training scripts for large language models using PyTorch's DDP (Distributed Data Parallel) and FSDP (Fully Sharded Data Parallel) strategies. Both are optimized for multi-GPU, multi-node SLURM clusters and support standard AdamW or hybrid Muon + Adam optimizers.
 
-## Overview
+## Contents
 
-This folder contains distributed training scripts for large language models using PyTorch's DDP (Distributed Data Parallel) and FSDP (Fully Sharded Data Parallel) strategies. Both are optimized for multi-GPU, multi-node SLURM clusters and support standard AdamW or hybrid Muon + Adam optimizers. The supported model families are vanilla GPT-style **dense transformers** (e.g. `LlamaForCausalLM`, `Qwen3ForCausalLM`) and the **Qwen3.5** family — dense, MoE, and hybrid linear/full-attention variants (`Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`).
+- [train_ddp.py](train_ddp.py) — Distributed Data Parallel (DDP) training script for transformer-based causal language models. Handles multi-GPU synchronization with gradient accumulation and checkpointing.
+- [train_fsdp.py](train_fsdp.py) — Fully Sharded Data Parallel (FSDP) training script for larger models requiring parameter and optimizer state sharding across nodes.
+- [trainer.py](trainer.py) — Contains `DDPTrainer` and `FSDPTrainer` classes that encapsulate the training and validation loops, checkpointing, and per-step logging.
+- [model_setup.py](model_setup.py) — Pre-DDP/FSDP model and tokenizer initialization, including architecture setup and optional context extension for continual pretraining.
+- [data_loading.py](data_loading.py) — Dataset loading and DataLoader creation with support for multiple data formats (JSONL, Parquet).
+- [optimizers.py](optimizers.py) — Optimizer and learning rate scheduler creation for both AdamW and Muon + Adam configurations.
+- [mfu.py](mfu.py) — Model FLOPs Utilization (MFU) calculation utilities for performance monitoring and benchmarking.
+- [specifications.py](specifications.py) — Dataclass definitions and type hints for all training arguments.
+- [specifications.yaml](specifications.yaml) — Example YAML configuration file for training settings.
+- [utils.py](utils.py) — Logging, checkpointing, distributed environment setup, and miscellaneous utilities.
 
-## Available Training Scripts
+## Usage Summary
 
-- **train_ddp.py** — Distributed Data Parallel (DDP) training script for transformer-based causal language models. Handles multi-GPU synchronization with gradient accumulation and checkpointing.
-- **train_fsdp.py** — Fully Sharded Data Parallel (FSDP) training script for larger models requiring parameter and optimizer state sharding across nodes.
+### `train_ddp.py`
 
-## Core Modules
+Distributed Data Parallel (DDP) training for transformer-based causal language models using PyTorch DDP with multi-GPU/multi-node synchronization, gradient accumulation, and checkpointing support.
 
-- **trainer.py** — Contains DDPTrainer and FSDPTrainer classes that encapsulate the training and validation loops, checkpointing, and per-step logging.
-- **model_setup.py** — Pre-DDP/FSDP model and tokenizer initialization, including architecture setup and optional context extension for continual pretraining.
-- **data_loading.py** — Dataset loading and DataLoader creation with support for multiple data formats (JSONL, Parquet).
-- **optimizers.py** — Optimizer and learning rate scheduler creation for both AdamW and Muon + Adam configurations.
-- **mfu.py** — Model FLOPs Utilization (MFU) calculation utilities for performance monitoring and benchmarking.
-- **specifications.py** — Dataclass definitions and type hints for all training arguments.
-- **utils.py** — Logging, checkpointing, distributed environment setup, and miscellaneous utilities.
+Examples:
 
-## Running Training
+```bash
+torchrun --nproc_per_node=4 distributed/train_ddp.py \
+    --specs distributed/specifications.yaml \
+    --slurm-job-id my_job_001 \
+    --hardware a100
 
-1. Configure `specifications.yaml` with your training settings:
-   - Dataset paths (`train_dataset_dir`, `val_dataset_dir`, `checkpoint_dir`)
-   - Model configuration (`path_to_model_config`, `base_model`, `tokenizer_name_or_path`)
-   - Training parameters (`learning_rate`, `batch_size`, `num_train_steps`, etc.)
-   - Optimization settings (optimizer choice, warmup, scheduler type)
+# DDP training with multi-node setup via SLURM
+sbatch distributed/train_ddp.sh
+```
 
-2. Launch training with SLURM using the provided shell scripts:
-   - DDP training: `python distributed/train_ddp.py --specs path/to/specifications.yaml --slurm-job-id $SLURM_JOB_ID --hardware "a100"`
-   - FSDP training: `python distributed/train_fsdp.py --specs path/to/specifications.yaml --slurm-job-id $SLURM_JOB_ID --hardware "a100"`
+Main parameters:
+- See [specifications.py](specifications.py) files for detailed argument definitions and defaults.
 
-   Or use the shell scripts for SLURM job submission:
-   - See `train_ddp.sh` for DDP SLURM configuration
-   - See `train_fsdp.sh` for FSDP SLURM configuration
+### `train_fsdp.py`
+
+Fully Sharded Data Parallel (FSDP2) training for large language models using PyTorch FSDP with parameter and optimizer state sharding across nodes. Supports zero-stage 2 (parameter sharding) and zero-stage 3 (full sharding).
+
+Examples:
+
+```bash
+# Basic FSDP training on 4 GPUs
+torchrun --nproc_per_node=4 distributed/train_fsdp.py \
+    --specs distributed/specifications.yaml \
+    --slurm-job-id my_job_001 \
+    --hardware a100
+
+# FSDP training with multi-node setup via SLURM
+sbatch distributed/train_fsdp.sh
+```
+
+Main parameters:
+- See [specifications.py](specifications.py) files for detailed argument definitions and defaults.
+
+## SLURM Cluster Jobs
+
+The `.sh` scripts are configured for SLURM-based GPU clusters. Key configuration variables:
+
+```bash
+# Example SLURM directives in train_ddp.sh / train_fsdp.sh
+#SBATCH --account=your_account
+#SBATCH --partition=sgpu_devel
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=480GB
+#SBATCH --time=01:00:00
+```
+
+Update the following in each shell script before submission:
+- `--account` — Your SLURM account
+- `--partition` — Target partition/queue
+- `--nodes` — Number of compute nodes
+- `--ntasks-per-node` — Number of GPUs per node
+- `username`, `workspace_name` — Paths to your working directory and model checkpoint locations
 
 ## Example Architecture Configs
 
@@ -145,7 +186,7 @@ Here we have toy examples of model config files covering the supported architect
   "initializer_range": 0.02,
   "rms_norm_eps": 1e-06,
   "use_cache": true,
-  "tie_word_embeddings": false,
+  "tie_word_embeddings": true,
   "attention_bias": false,
   "attention_dropout": 0.0,
   "partial_rotary_factor": 0.25,
@@ -192,7 +233,7 @@ Every 4th layer is full attention, the rest use Gated-DeltaNet linear attention.
   "initializer_range": 0.02,
   "rms_norm_eps": 1e-06,
   "use_cache": true,
-  "tie_word_embeddings": false,
+  "tie_word_embeddings": true,
   "attention_bias": false,
   "attention_dropout": 0.0,
   "partial_rotary_factor": 0.25,
@@ -242,7 +283,7 @@ Every 4th layer is full attention, the rest use Gated-DeltaNet linear attention.
   "initializer_range": 0.02,
   "rms_norm_eps": 1e-06,
   "use_cache": true,
-  "tie_word_embeddings": false,
+  "tie_word_embeddings": true,
   "attention_bias": false,
   "attention_dropout": 0.0,
   "partial_rotary_factor": 0.25,
@@ -296,7 +337,7 @@ Every 4th layer is full attention, the rest use Gated-DeltaNet linear attention;
   "initializer_range": 0.02,
   "rms_norm_eps": 1e-06,
   "use_cache": true,
-  "tie_word_embeddings": false,
+  "tie_word_embeddings": true,
   "attention_bias": false,
   "attention_dropout": 0.0,
   "partial_rotary_factor": 0.25,

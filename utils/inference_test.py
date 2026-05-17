@@ -46,14 +46,14 @@ Completion Mode (--completion):
     ]
     ```
 
-    Example usage:
-        python inference_test.py \\
-            --model_path checkpoints/base-model \\
-            --samples_file samples.json \\
-            --output_file results/evaluation.json \\
-            --max_new_tokens 256 \\
-            --temperature 0.7 \\
-            --mode completion
+Usage:
+    python inference_test.py \\
+        --model_path checkpoints/base-model \\
+        --samples_file samples.json \\
+        --output_file results/evaluation.json \\
+        --max_new_tokens 256 \\
+        --temperature 0.7 \\
+        --mode completion
 
 Output:
     - JSON file with results

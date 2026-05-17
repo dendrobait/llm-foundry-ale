@@ -363,7 +363,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tokenizer_name_or_path",
         type=str,
-        default="Qwen/Qwen3-0.6B-Base",
+        default="Qwen/Qwen3-0.6B",
         help="Tokenizer name or path for token counting (default: Qwen3)",
     )
 
